@@ -10,8 +10,7 @@ mod usb;
 
 //use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::rcc::{Hse, HseMode, Pll, APBPrescaler};
-use embassy_stm32::usb::Driver;
-use embassy_stm32::usb::Config as UsbConfig;
+use embassy_stm32::usb::{Driver, Config as UsbConfig};
 use embassy_stm32::{Config, bind_interrupts, peripherals};
 
 use {defmt_rtt as _, panic_probe as _};
@@ -36,17 +35,17 @@ async fn main(spawner: Spawner) {
     config.rcc.pll_src = embassy_stm32::rcc::PllSource::HSE;
     config.rcc.pll = Some(Pll {
         prediv: embassy_stm32::rcc::PllPreDiv::DIV4, // 8MHz / 4 = 2MHz
-        mul: embassy_stm32::rcc::PllMul::MUL168, // 2MHz * 336 = 672MHz
+        mul: embassy_stm32::rcc::PllMul::MUL168, // 2MHz * 168 = 336MHz
         divp: Some(embassy_stm32::rcc::PllPDiv::DIV4), // 336MHz / 4 = 84MHz (Sysclk máximo del F401)
         divq: Some(embassy_stm32::rcc::PllQDiv::DIV7), // 336MHz / 7 = 48MHz (¡Reloj exacto para el USB!)
         divr: None,
     });
 
-    config.rcc.sys = embassy_stm32::rcc::Sysclk::PLL1_P;
+    config.rcc.sys = embassy_stm32::rcc::Sysclk::PLL1_P; // Usamos el PLL como fuente del sistema
 
     // Límites del F446: APB1 = max 45MHz, APB2 = max 90MHz
-    config.rcc.apb1_pre = APBPrescaler::DIV4; // 168 MHz / 4 = 42 MHz (Seguro, menor a 45)
-    config.rcc.apb2_pre = APBPrescaler::DIV2; // 168 MHz / 2 = 84 MHz (Seguro, menor a 90)
+    config.rcc.apb1_pre = APBPrescaler::DIV2; // 168 MHz / 2 = 42 MHz (Seguro, menor a 45)
+    config.rcc.apb2_pre = APBPrescaler::DIV1; // 168 MHz / 1 = 84 MHz (Seguro, menor a 90)
 
     let p = embassy_stm32::init(config);
     info!("Relojes configurados. Iniciando driver USB...");
