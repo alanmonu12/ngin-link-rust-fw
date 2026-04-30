@@ -8,10 +8,13 @@ defmt.workspace = true
 defmt-rtt = "0.4"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 
-embassy-stm32.workspace = true
+embassy-stm32 = { workspace = true, features = ["rt"] }
 embassy-executor.workspace = true
 embassy-usb.workspace = true
+embassy-time.workspace = true
 static_cell = "2.0"
+cortex-m-rt.workspace = true
+cortex-m.workspace = true
 
 # Dependencias a nuestros crates del workspace
 bsp-f446 = { path = "../crates/bsp-f446" }

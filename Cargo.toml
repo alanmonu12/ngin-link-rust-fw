@@ -11,6 +11,10 @@ resolver = "2"
 # usen exactamente la misma versión, evitando conflictos.
 [workspace.dependencies]
 defmt = "0.3"
-embassy-stm32 = { version = "0.1.0", features = ["defmt", "stm32f446re", "unstable-pac", "memory-x", "time-driver-any", "exti"] }
-embassy-executor = { version = "0.5.0", features = ["arch-cortex-m", "executor-thread", "defmt", "integrated-timers"] }
-embassy-usb = { version = "0.1.0", features = ["defmt"] }
+embassy-stm32 = { version = "0.6.0", features = ["defmt", "stm32f446re", "unstable-pac", "memory-x", "time-driver-any", "exti"] }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-usb = { version = "0.6.0", features = ["defmt"] }
+embassy-time = { version = "0.5.1", features = ["defmt"] }
+cortex-m-rt = "0.7"
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+bytemuck = { version = "1.16.0", features = ["derive"] }

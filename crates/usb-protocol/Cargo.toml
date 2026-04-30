@@ -1,11 +1,12 @@
 [package]
-name = "ngin-usb-protocol"
+name = "usb-protocol"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 defmt.workspace = true
 embassy-usb.workspace = true
+bytemuck.workspace = true
 
 # No incluimos embassy-stm32 aquí. Este crate debe ser 100% independiente 
 # del hardware para poder ser testeado en el host.

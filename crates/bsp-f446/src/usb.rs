@@ -4,8 +4,8 @@ use embassy_usb::{Builder, UsbDevice};
 use static_cell::StaticCell;
 
 // Importamos la lógica pura desde nuestro nuevo crate en el workspace
-use ngin_usb_protocol::default_gs_usb_config;
-use ngin_usb_protocol::handler::GsUsbControlHandler;
+use usb_protocol::default_gs_usb_config;
+use usb_protocol::handler::GsUsbControlHandler;
 
 // Buffers de memoria estática que necesita el USB
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();

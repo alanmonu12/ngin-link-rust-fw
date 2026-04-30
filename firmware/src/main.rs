@@ -4,14 +4,9 @@
 use defmt::*;
 use embassy_executor::Spawner;
 
-
-// Declaramos nuestro nuevo módulo
-mod usb;
-
 //use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::rcc::{Hse, HseMode, Pll, APBPrescaler};
 use embassy_stm32::usb::{Driver, Config as UsbConfig};
-use embassy_stm32::{Config, bind_interrupts, peripherals};
+use embassy_stm32::{bind_interrupts, peripherals};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -24,30 +19,8 @@ bind_interrupts!(struct Irqs {
 // La macro #[embassy_executor::main] configura el entorno asíncrono por ti
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // 2. Configuramos el microcontrolador
-    let mut config = Config::default();
-
-    config.rcc.hse = Some(Hse {
-        freq: embassy_stm32::time::Hertz(8_000_000), // Frecuencia del cristal externo
-        mode: HseMode::Bypass, // Usamos el cristal externo en modo bypass
-    });
-
-    config.rcc.pll_src = embassy_stm32::rcc::PllSource::HSE;
-    config.rcc.pll = Some(Pll {
-        prediv: embassy_stm32::rcc::PllPreDiv::DIV4, // 8MHz / 4 = 2MHz
-        mul: embassy_stm32::rcc::PllMul::MUL168, // 2MHz * 168 = 336MHz
-        divp: Some(embassy_stm32::rcc::PllPDiv::DIV4), // 336MHz / 4 = 84MHz (Sysclk máximo del F446)
-        divq: Some(embassy_stm32::rcc::PllQDiv::DIV7), // 336MHz / 7 = 48MHz (¡Reloj exacto para el USB!)
-        divr: None,
-    });
-
-    config.rcc.sys = embassy_stm32::rcc::Sysclk::PLL1_P; // Usamos el PLL como fuente del sistema
-
-    // Límites del F446: APB1 = max 45MHz, APB2 = max 90MHz
-    config.rcc.apb1_pre = APBPrescaler::DIV2; // 168 MHz / 2 = 42 MHz (Seguro, menor a 45)
-    config.rcc.apb2_pre = APBPrescaler::DIV1; // 168 MHz / 1 = 84 MHz (Seguro, menor a 90)
-
-    let p = embassy_stm32::init(config);
+    // 2. Inicializamos el microcontrolador y los relojes desde el BSP
+    let p = bsp_f446::init();
     info!("Relojes configurados. Iniciando driver USB...");
 
     // 3. Reservamos memoria estática para el FIFO RX (El contenedor general de recepción)
@@ -60,11 +33,11 @@ async fn main(spawner: Spawner) {
 
     let driver = Driver::new_fs(p.USB_OTG_FS, Irqs, p.PA12, p.PA11, ep_out_buffer, usb_config);
 
-    // Llamamos a nuestro módulo para construir el USB
-    let usb_device = usb::build_usb_device(driver);
+    // Llamamos al BSP para construir el USB
+    let usb_device = bsp_f446::usb::build_usb_device(driver);
 
     // 5. Lanzamos la tarea de fondo del USB
-    spawner.spawn(usb::usb_task(usb_device).unwrap());
+    spawner.spawn(bsp_f446::usb::usb_task(usb_device).unwrap());
 
     info!("¡Sistema configurado y listo!");
 

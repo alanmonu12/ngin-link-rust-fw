@@ -1,5 +1,5 @@
 [package]
-name = "ngin-bsp"
+name = "bsp-f446"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,7 +7,8 @@ edition = "2021"
 defmt.workspace = true
 embassy-stm32.workspace = true
 embassy-usb.workspace = true
+embassy-executor.workspace = true
 static_cell = "2.0"
 
 # El BSP usa el protocolo para inyectarlo en el hardware
-ngin-usb-protocol = { path = "../usb-protocol" }
+usb-protocol = { path = "../usb-protocol" }

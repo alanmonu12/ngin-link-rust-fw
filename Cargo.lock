@@ -82,9 +82,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.11.0"
+version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "block-device-driver"
@@ -96,16 +96,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsp-f446"
+version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
+ "embassy-executor",
+ "embassy-stm32",
+ "embassy-usb",
+ "static_cell",
+ "usb-protocol",
+]
+
+[[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "can-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "cc"
-version = "1.2.58"
+version = "1.2.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e928d4b69e3077709075a938a05ffbedfa53a84c8f766efbf8220bb1ff60e1"
+checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -267,6 +303,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0641612053b2f34fc250bb63f6630ae75de46e02ade7f457268447081d709ce"
 dependencies = [
+ "defmt 1.0.1",
  "embassy-futures",
  "embassy-hal-internal 0.4.0",
  "embassy-sync",
@@ -335,6 +372,7 @@ checksum = "568659fc53866d3d85c60fa33723fb751aa69e71507634fc2c19e7649432fb75"
 dependencies = [
  "cortex-m",
  "critical-section",
+ "defmt 1.0.1",
  "num-traits",
 ]
 
@@ -343,6 +381,9 @@ name = "embassy-net-driver"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "524eb3c489760508f71360112bca70f6e53173e6fe48fc5f0efd0f5ab217751d"
+dependencies = [
+ "defmt 0.3.100",
+]
 
 [[package]]
 name = "embassy-net-driver-channel"
@@ -363,12 +404,13 @@ checksum = "486c0622deb5a519fc4d2cb8e3ef324f7568fcdfff201ff8fcab46557d663ceb"
 dependencies = [
  "aligned",
  "bit_field",
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "block-device-driver",
  "cfg-if",
  "cortex-m",
  "cortex-m-rt",
  "critical-section",
+ "defmt 1.0.1",
  "document-features",
  "embassy-embedded-hal",
  "embassy-futures",
@@ -414,6 +456,7 @@ checksum = "7bbd85cf5a5ae56bdf26f618364af642d1d0a4e245cdd75cd9aabda382f65a81"
 dependencies = [
  "cfg-if",
  "critical-section",
+ "defmt 1.0.1",
  "embedded-io-async 0.7.0",
  "futures-core",
  "futures-sink",
@@ -448,12 +491,12 @@ dependencies = [
 
 [[package]]
 name = "embassy-time-queue-utils"
-version = "0.3.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80e2ee86063bd028a420a5fb5898c18c87a8898026da1d4c852af2c443d0a454"
+checksum = "168297bf80aaf114b3c9ad589bf38b01b3009b9af7f97cd18086c5bbf96f5693"
 dependencies = [
  "embassy-executor-timer-queue",
- "heapless 0.8.0",
+ "heapless 0.9.2",
 ]
 
 [[package]]
@@ -462,7 +505,8 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a25746d8b152b72fbf2a217f489a083dbbe243f281f09184a1f2cfbe9bbb245f"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
+ "defmt 1.0.1",
  "embassy-futures",
  "embassy-net-driver-channel",
  "embassy-sync",
@@ -480,6 +524,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17119855ccc2d1f7470a39756b12068454ae27a3eabb037d940b5c03d9c77b7a"
 dependencies = [
+ "defmt 1.0.1",
  "embedded-io-async 0.6.1",
 ]
 
@@ -490,6 +535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbe46f4083109c7ea12a03ca61095d1e87c76fec52c7ca9ee06a42935606dacb"
 dependencies = [
  "critical-section",
+ "defmt 1.0.1",
  "embassy-sync",
  "embassy-usb-driver",
 ]
@@ -549,6 +595,9 @@ name = "embedded-io"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
+dependencies = [
+ "defmt 1.0.1",
+]
 
 [[package]]
 name = "embedded-io-async"
@@ -565,6 +614,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2564b9f813c544241430e147d8bc454815ef9ac998878d30cc3055449f7fd4c0"
 dependencies = [
+ "defmt 1.0.1",
  "embedded-io 0.7.1",
 ]
 
@@ -697,9 +747,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.183"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "litrs"
@@ -757,9 +807,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 
 [[package]]
-name = "ngin-link-rust-fw"
+name = "ngin-link-firmware"
 version = "0.1.0"
 dependencies = [
+ "bsp-f446",
  "cortex-m",
  "cortex-m-rt",
  "defmt 0.3.100",
@@ -768,9 +819,9 @@ dependencies = [
  "embassy-stm32",
  "embassy-time",
  "embassy-usb",
- "embassy-usb-synopsys-otg",
  "panic-probe",
  "static_cell",
+ "usb-protocol",
 ]
 
 [[package]]
@@ -1040,6 +1091,7 @@ checksum = "e74b78632cea498cfb28386a29f8bfae7476d6570a78733eb5fecbee66c2f4ce"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "defmt 0.3.100",
 ]
 
 [[package]]
@@ -1185,6 +1237,15 @@ checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
 dependencies = [
  "heapless 0.8.0",
  "portable-atomic",
+]
+
+[[package]]
+name = "usb-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "defmt 0.3.100",
+ "embassy-usb",
 ]
 
 [[package]]
