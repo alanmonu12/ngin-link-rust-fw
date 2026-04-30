@@ -74,3 +74,5 @@ impl Handler for GsUsbControlHandler {
         None
     }
 }
+
+pub mod Handler;

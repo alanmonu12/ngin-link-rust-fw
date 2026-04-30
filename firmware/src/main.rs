@@ -36,7 +36,7 @@ async fn main(spawner: Spawner) {
     config.rcc.pll = Some(Pll {
         prediv: embassy_stm32::rcc::PllPreDiv::DIV4, // 8MHz / 4 = 2MHz
         mul: embassy_stm32::rcc::PllMul::MUL168, // 2MHz * 168 = 336MHz
-        divp: Some(embassy_stm32::rcc::PllPDiv::DIV4), // 336MHz / 4 = 84MHz (Sysclk máximo del F401)
+        divp: Some(embassy_stm32::rcc::PllPDiv::DIV4), // 336MHz / 4 = 84MHz (Sysclk máximo del F446)
         divq: Some(embassy_stm32::rcc::PllQDiv::DIV7), // 336MHz / 7 = 48MHz (¡Reloj exacto para el USB!)
         divr: None,
     });

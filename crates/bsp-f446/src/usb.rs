@@ -1,10 +1,11 @@
-pub mod handler;
-
 use embassy_stm32::usb::Driver;
 use embassy_stm32::peripherals::USB_OTG_FS;
-use embassy_usb::{Builder, Config, UsbDevice};
+use embassy_usb::{Builder, UsbDevice};
 use static_cell::StaticCell;
-use handler::GsUsbControlHandler;
+
+// Importamos la lógica pura desde nuestro nuevo crate en el workspace
+use ngin_usb_protocol::default_gs_usb_config;
+use ngin_usb_protocol::handler::GsUsbControlHandler;
 
 // Buffers de memoria estática que necesita el USB
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
@@ -15,12 +16,7 @@ static CONTROL_HANDLER: StaticCell<GsUsbControlHandler> = StaticCell::new();
 
 // Función pública para construir el dispositivo USB
 pub fn build_usb_device(driver: Driver<'static, USB_OTG_FS>) -> UsbDevice<'static, Driver<'static, USB_OTG_FS>> {
-    let mut config_usb = Config::new(0x1d50, 0x606f);
-    config_usb.manufacturer = Some("Ngin");
-    config_usb.product = Some("Ngin-link PoC");
-    config_usb.serial_number = Some("12345678");
-    config_usb.max_power = 100;
-    config_usb.max_packet_size_0 = 64;
+    let config_usb = default_gs_usb_config();
 
     let mut builder = Builder::new(
         driver,
