@@ -17,28 +17,12 @@ impl Handler for GsUsbControlHandler {
         info!("-> IN Req: {}, Val: {}, Len: {}", req.request, req.value, req.length);
 
         match req.request {
-            // El host pregunta por las capacidades del dispositivo (Request 4)
-            GS_USB_BREQ_DEVICE_CONFIG => { // Correcto es 4, no 5
-                let config = GsDeviceConfig {
-                    interface_count: 1, // We have one CAN interface.
-                    sw_version: 1,      // Firmware version 1.
-                    hw_version: 1,      // Hardware version 1.
-                    ..Default::default()
-                };
-
-                let bytes = bytemuck::bytes_of(&config);
-                buf[..bytes.len()].copy_from_slice(bytes);
-                return Some(InResponse::Accepted(&buf[..bytes.len()]));
-            }
-
-            // El host pregunta por las constantes de temporización del CAN (Request 10)
-            GS_USB_BREQ_BT_CONST => { // Correcto es 10, no 4
+            // El host pregunta por las constantes de temporización del CAN (Request 4)
+            GS_USB_BREQ_BT_CONST => {
                 // These values are specific to the bxCAN peripheral in the STM32F4 series.
                 let timings = GsDeviceBtConst {
                     feature: GS_CAN_FEATURE_LISTEN_ONLY | GS_CAN_FEATURE_LOOP_BACK,
-                    // This must match the clock fed to the CAN peripheral.
-                    // In our bsp-f446, APB1 is 42MHz.
-                    fclk_can: 42_000_000, // 42MHz para APB1
+                    fclk_can: 42_000_000,
                     tseg1_min: 1,
                     tseg1_max: 16,
                     tseg2_min: 1,
@@ -50,8 +34,24 @@ impl Handler for GsUsbControlHandler {
                 };
 
                 let bytes = bytemuck::bytes_of(&timings);
-                buf[..bytes.len()].copy_from_slice(bytes);
-                return Some(InResponse::Accepted(&buf[..bytes.len()]));
+                let len = core::cmp::min(buf.len(), bytes.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                return Some(InResponse::Accepted(&buf[..len]));
+            }
+
+            // El host pregunta por las capacidades del dispositivo (Request 5)
+            GS_USB_BREQ_DEVICE_CONFIG => {
+                let config = GsDeviceConfig {
+                    interface_count: 1, // We have one CAN interface.
+                    sw_version: 1,      // Firmware version 1.
+                    hw_version: 1,      // Hardware version 1.
+                    ..Default::default()
+                };
+
+                let bytes = bytemuck::bytes_of(&config);
+                let len = core::cmp::min(buf.len(), bytes.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                return Some(InResponse::Accepted(&buf[..len]));
             }
 
             _ => {
@@ -71,7 +71,17 @@ impl Handler for GsUsbControlHandler {
         info!("<- OUT Req: {}, Val: {}, Len: {}", req.request, req.value, req.length);
 
         match req.request {
-            GS_USB_BREQ_HOST_FORMAT | GS_USB_BREQ_BITTIMING | GS_USB_BREQ_SET_TERMINATION => {
+            GS_USB_BREQ_BITTIMING => {
+                if buf.len() >= core::mem::size_of::<GsDeviceBitTiming>() {
+                    let timing: GsDeviceBitTiming = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsDeviceBitTiming>()]);
+                    info!(
+                        "[USB] Nuevo Bit Timing recibido: brp={}, prop_seg={}, phase1={}, phase2={}, sjw={}",
+                        timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw
+                    );
+                }
+                return Some(OutResponse::Accepted);
+            }
+            GS_USB_BREQ_HOST_FORMAT | GS_USB_BREQ_SET_TERMINATION => {
                 return Some(OutResponse::Accepted);
             }
             GS_USB_BREQ_MODE => {

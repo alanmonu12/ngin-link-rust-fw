@@ -32,6 +32,18 @@ pub struct GsDeviceBtConst {
     pub brp_inc: u32,
 }
 
+/// Data structure for GS_USB_BREQ_BITTIMING.
+/// Received from the host to configure the CAN bus speed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GsDeviceBitTiming {
+    pub prop_seg: u32,
+    pub phase_seg1: u32,
+    pub phase_seg2: u32,
+    pub sjw: u32,
+    pub brp: u32,
+}
+
 // Supported features for GsDeviceBtConst.feature
 pub const GS_CAN_FEATURE_LISTEN_ONLY: u32 = 1 << 1;
 pub const GS_CAN_FEATURE_LOOP_BACK: u32 = 1 << 2;
@@ -41,13 +53,13 @@ pub const GS_USB_BREQ_HOST_FORMAT: u8 = 0;
 pub const GS_USB_BREQ_BITTIMING: u8 = 1;
 pub const GS_USB_BREQ_MODE: u8 = 2;
 pub const GS_USB_BREQ_BERR: u8 = 3;
-pub const GS_USB_BREQ_DEVICE_CONFIG: u8 = 4;
-pub const GS_USB_BREQ_TIMESTAMP: u8 = 5;
-pub const GS_USB_BREQ_IDENTIFY: u8 = 6;
-pub const GS_USB_BREQ_GET_USER_ID: u8 = 7;
-pub const GS_USB_BREQ_SET_USER_ID: u8 = 8;
-pub const GS_USB_BREQ_DATA_BITTIMING: u8 = 9;
-pub const GS_USB_BREQ_BT_CONST: u8 = 10;
+pub const GS_USB_BREQ_BT_CONST: u8 = 4;
+pub const GS_USB_BREQ_DEVICE_CONFIG: u8 = 5;
+pub const GS_USB_BREQ_TIMESTAMP: u8 = 6;
+pub const GS_USB_BREQ_IDENTIFY: u8 = 7;
+pub const GS_USB_BREQ_GET_USER_ID: u8 = 8;
+pub const GS_USB_BREQ_SET_USER_ID: u8 = 9;
+pub const GS_USB_BREQ_DATA_BITTIMING: u8 = 10;
 pub const GS_USB_BREQ_DEV_CAPABILITIES: u8 = 11;
 pub const GS_USB_BREQ_SET_TERMINATION: u8 = 12;
 pub const GS_USB_BREQ_GET_TERMINATION: u8 = 13;
