@@ -11,4 +11,4 @@ embassy-executor.workspace = true
 static_cell = "2.0"
 
 # El BSP usa el protocolo para inyectarlo en el hardware
-usb-protocol = { path = "../usb-protocol" }
+gs-usb-protocol = { path = "../gs-usb-protocol" }

@@ -1,4 +1,5 @@
-#![no_std]
+// Desactiva 'std' en producción, pero lo activa al correr `cargo test` en la PC
+#![cfg_attr(not(test), no_std)]
 
 // Declaramos nuestro submódulo (en minúsculas)
 pub mod handler;
@@ -16,3 +17,6 @@ pub fn default_gs_usb_config() -> Config<'static> {
     config_usb.max_packet_size_0 = 64;
     config_usb
 }
+
+#[cfg(test)]
+mod handler_tests;

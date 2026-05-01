@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/bsp-f446",
-    "crates/usb-protocol",
+    "crates/gs-usb-protocol",
     "crates/can-protocol",
     "firmware"
 ]

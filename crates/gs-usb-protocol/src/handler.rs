@@ -1,4 +1,11 @@
+// Usamos defmt en producción (microcontrolador)
+#[cfg(not(test))]
 use defmt::info;
+
+// Ignoramos los logs en las pruebas del host para evitar errores de compilación con defmt
+#[cfg(test)]
+macro_rules! info { ($($arg:tt)*) => {} }
+
 use embassy_usb::control::{InResponse, OutResponse, Request, RequestType};
 use embassy_usb::Handler;
 
@@ -73,10 +80,10 @@ impl Handler for GsUsbControlHandler {
         match req.request {
             GS_USB_BREQ_BITTIMING => {
                 if buf.len() >= core::mem::size_of::<GsDeviceBitTiming>() {
-                    let timing: GsDeviceBitTiming = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsDeviceBitTiming>()]);
+                    let _timing: GsDeviceBitTiming = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsDeviceBitTiming>()]);
                     info!(
                         "[USB] Nuevo Bit Timing recibido: brp={}, prop_seg={}, phase1={}, phase2={}, sjw={}",
-                        timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw
+                        _timing.brp, _timing.prop_seg, _timing.phase_seg1, _timing.phase_seg2, _timing.sjw
                     );
                 }
                 return Some(OutResponse::Accepted);

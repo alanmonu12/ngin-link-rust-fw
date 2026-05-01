@@ -103,8 +103,8 @@ dependencies = [
  "embassy-executor",
  "embassy-stm32",
  "embassy-usb",
+ "gs-usb-protocol",
  "static_cell",
- "usb-protocol",
 ]
 
 [[package]]
@@ -696,6 +696,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gs-usb-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "defmt 0.3.100",
+ "embassy-usb",
+]
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -819,9 +828,9 @@ dependencies = [
  "embassy-stm32",
  "embassy-time",
  "embassy-usb",
+ "gs-usb-protocol",
  "panic-probe",
  "static_cell",
- "usb-protocol",
 ]
 
 [[package]]
@@ -1237,15 +1246,6 @@ checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
 dependencies = [
  "heapless 0.8.0",
  "portable-atomic",
-]
-
-[[package]]
-name = "usb-protocol"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "defmt 0.3.100",
- "embassy-usb",
 ]
 
 [[package]]
