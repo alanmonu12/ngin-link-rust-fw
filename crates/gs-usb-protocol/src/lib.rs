@@ -1,5 +1,5 @@
-// Desactiva 'std' en producción, pero lo activa al correr `cargo test` en la PC
-#![cfg_attr(not(test), no_std)]
+// Aplicamos no_std solo cuando compilamos para el microcontrolador (bare-metal)
+#![cfg_attr(target_os = "none", no_std)]
 
 // Declaramos nuestro submódulo (en minúsculas)
 pub mod handler;
@@ -18,5 +18,6 @@ pub fn default_gs_usb_config() -> Config<'static> {
     config_usb
 }
 
-#[cfg(test)]
+// Solo incluimos las pruebas si estamos en la PC (evita errores en Rust-Analyzer)
+#[cfg(all(test, not(target_os = "none")))]
 mod handler_tests;
