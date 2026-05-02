@@ -1,5 +1,5 @@
-use embassy_stm32::usb::Driver;
-use embassy_stm32::peripherals::USB_OTG_FS;
+use embassy_stm32::usb::{Driver, InterruptHandler};
+use embassy_stm32::{bind_interrupts, peripherals};
 use embassy_usb::{Builder, UsbDevice};
 use static_cell::StaticCell;
 
@@ -13,9 +13,24 @@ static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static MSOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
 static CONTROL_HANDLER: StaticCell<GsUsbControlHandler> = StaticCell::new();
+static EP_OUT_BUFFER: StaticCell<[u8; 256]> = StaticCell::new();
+
+// Enlazamos la interrupción aquí, ocultándola del main
+bind_interrupts!(pub struct Irqs {
+    OTG_FS => InterruptHandler<peripherals::USB_OTG_FS>;
+});
+
+// Alias de tipos para exportar al exterior sin exponer los detalles genéricos del STM32
+pub type BspUsbDriver = Driver<'static, peripherals::USB_OTG_FS>;
+pub type BspUsbDevice = UsbDevice<'static, BspUsbDriver>;
+
+// Exportamos el buffer para inicializar el Driver desde lib.rs
+pub fn get_ep_out_buffer() -> &'static mut [u8; 256] {
+    EP_OUT_BUFFER.init([0; 256])
+}
 
 // Función pública para construir el dispositivo USB
-pub fn build_usb_device(driver: Driver<'static, USB_OTG_FS>) -> UsbDevice<'static, Driver<'static, USB_OTG_FS>> {
+pub fn init_usb(driver: BspUsbDriver) -> BspUsbDevice {
     let config_usb = default_gs_usb_config();
 
     let mut builder = Builder::new(
@@ -45,6 +60,6 @@ pub fn build_usb_device(driver: Driver<'static, USB_OTG_FS>) -> UsbDevice<'stati
 
 // La tarea de ejecución continua (Loop)
 #[embassy_executor::task]
-pub async fn usb_task(mut usb: UsbDevice<'static, Driver<'static, USB_OTG_FS>>) -> ! {
+pub async fn usb_task(mut usb: BspUsbDevice) -> ! {
     usb.run().await
 }

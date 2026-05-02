@@ -2,10 +2,16 @@
 pub mod usb;
 
 use embassy_stm32::rcc::{Hse, HseMode, Pll, APBPrescaler, PllSource, PllPreDiv, PllMul, PllPDiv, PllQDiv, Sysclk};
-use embassy_stm32::{Config, Peripherals};
+use embassy_stm32::Config;
+
+/// Estructura que contiene todos los periféricos listos para usar por la aplicación
+pub struct Bsp {
+    pub usb_device: usb::BspUsbDevice,
+    // Aquí podrías agregar en el futuro: pub can_driver: BspCanDriver, etc.
+}
 
 /// Inicializa el microcontrolador y configura los relojes (RCC y PLL)
-pub fn init() -> Peripherals {
+pub fn init() -> Bsp {
     let mut config = Config::default();
 
     config.rcc.hse = Some(Hse {
@@ -28,5 +34,21 @@ pub fn init() -> Peripherals {
     config.rcc.apb1_pre = APBPrescaler::DIV2; // 168 MHz / 2 = 42 MHz (Seguro, menor a 45)
     config.rcc.apb2_pre = APBPrescaler::DIV1; // 168 MHz / 1 = 84 MHz (Seguro, menor a 90)
 
-    embassy_stm32::init(config)
+    let p = embassy_stm32::init(config);
+
+    let mut usb_config = embassy_stm32::usb::Config::default();
+    usb_config.vbus_detection = false; // La Nucleo no enruta VBUS por defecto
+
+    let driver = embassy_stm32::usb::Driver::new_fs(
+        p.USB_OTG_FS,
+        usb::Irqs,
+        p.PA12,
+        p.PA11,
+        usb::get_ep_out_buffer(),
+        usb_config,
+    );
+
+    Bsp {
+        usb_device: usb::init_usb(driver),
+    }
 }
