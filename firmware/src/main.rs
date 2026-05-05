@@ -3,8 +3,14 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 
 use {defmt_rtt as _, panic_probe as _};
+
+// Cola (Channel) para comunicar la tarea del CAN (Productor) con la del USB (Consumidor).
+// Usamos CriticalSectionRawMutex y una capacidad de 32 mensajes (ajustable según RAM/necesidad).
+static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, can_protocol::CanFrame, 32> = Channel::new();
 
 // La macro #[embassy_executor::main] configura el entorno asíncrono por ti
 #[embassy_executor::main]
@@ -15,8 +21,10 @@ async fn main(spawner: Spawner) {
     info!("Hardware y relojes configurados. Iniciando driver USB...");
 
     // 2. Lanzamos la tarea de fondo del USB
-    spawner.spawn(bsp_f446::usb::usb_task(bsp.usb_device).unwrap());
-    spawner.spawn(can_to_usb_router_task(bsp.can_driver).unwrap());
+    spawner.spawn(usb_task(bsp.usb_device).unwrap());
+    
+    spawner.spawn(can_rx_task(bsp.can_driver).unwrap());
+    spawner.spawn(usb_tx_task().unwrap());
 
     info!("¡Sistema configurado y listo!");
 
@@ -27,7 +35,14 @@ async fn main(spawner: Spawner) {
 
 
 #[embassy_executor::task]
-async fn can_to_usb_router_task(mut can: bsp_f446::can::BspCan /*, mut usb_in_ep: BulkInEndpoint ... */) {
+async fn usb_task(mut usb: bsp_f446::usb::BspUsbDevice) -> ! {
+    usb.run().await
+}
+
+
+// Tarea 1: Productor (Solo lee del hardware CAN lo más rápido posible)
+#[embassy_executor::task]
+async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
     loop {
         // 1. Esperamos asíncronamente a que llegue un mensaje del CAN
         if let Ok(env) = can.read().await {
@@ -49,7 +64,7 @@ async fn can_to_usb_router_task(mut can: bsp_f446::can::BspCan /*, mut usb_in_ep
 
             let generic_frame = can_protocol::CanFrame { id, is_extended, data, dlc: dlc as u8 };
 
-            // 3. Usamos nuestro analizador
+            // 2. Usamos nuestro analizador al vuelo para logs
             let decoded = can_protocol::analyze_frame(&generic_frame);
             match decoded {
                 can_protocol::DecodedProtocol::Obd2Request(cmd) => defmt::info!("OBD2: {:?}", defmt::Debug2Format(&cmd)),
@@ -57,8 +72,20 @@ async fn can_to_usb_router_task(mut can: bsp_f446::can::BspCan /*, mut usb_in_ep
                 can_protocol::DecodedProtocol::Raw => {} // No loggeamos los miles de Raw
             }
 
-            // 4. Empaquetar el frame al formato `gs_usb` (GsHostFrame) y mandar por USB...
+            // 3. Enviamos a la cola para que la tarea del USB lo procese luego.
+            CAN_RX_CHANNEL.send(generic_frame).await;
         }
+    }
+}
+
+// Tarea 2: Consumidor (Saca de la cola y en el futuro escribirá al USB)
+#[embassy_executor::task]
+async fn usb_tx_task(/* mut usb_in_ep: BulkInEndpoint ... */) {
+    loop {
+        // Esperamos dormidos a que la tarea del CAN RX meta algo en la cola
+        let _frame = CAN_RX_CHANNEL.receive().await;
+        
+        // (Por ahora no hacemos nada más. En el futuro armaremos GsHostFrame y mandaremos a la PC)
     }
 }
 

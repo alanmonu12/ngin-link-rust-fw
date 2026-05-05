@@ -11,6 +11,7 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 embassy-stm32 = { workspace = true, features = ["rt"] }
 embassy-executor.workspace = true
 embassy-usb.workspace = true
+embassy-sync.workspace = true
 embassy-time.workspace = true
 static_cell = "2.0"
 cortex-m-rt.workspace = true

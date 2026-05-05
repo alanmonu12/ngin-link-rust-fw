@@ -57,9 +57,3 @@ pub fn init_usb(driver: BspUsbDriver) -> BspUsbDevice {
 
     builder.build()
 }
-
-// La tarea de ejecución continua (Loop)
-#[embassy_executor::task]
-pub async fn usb_task(mut usb: BspUsbDevice) -> ! {
-    usb.run().await
-}
