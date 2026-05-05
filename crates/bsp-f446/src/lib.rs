@@ -1,5 +1,6 @@
 #![no_std]
 pub mod usb;
+pub mod can;
 
 use embassy_stm32::rcc::{Hse, HseMode, Pll, APBPrescaler, PllSource, PllPreDiv, PllMul, PllPDiv, PllQDiv, Sysclk};
 use embassy_stm32::Config;
@@ -7,7 +8,7 @@ use embassy_stm32::Config;
 /// Estructura que contiene todos los periféricos listos para usar por la aplicación
 pub struct Bsp {
     pub usb_device: usb::BspUsbDevice,
-    // Aquí podrías agregar en el futuro: pub can_driver: BspCanDriver, etc.
+    pub can_driver: can::BspCan,
 }
 
 /// Inicializa el microcontrolador y configura los relojes (RCC y PLL)
@@ -48,7 +49,14 @@ pub fn init() -> Bsp {
         usb_config,
     );
 
+    // Inicializamos el CAN1 con los pines estándar (PB8=RX, PB9=TX).
+    // Al crear el objeto `Can`, Embassy configura los pines y los relojes y
+    // deja por defecto al bxCAN en "Initialization mode" (sin acoplarse al bus).
+    // Esto es ideal, esperamos que el Host USB configure los tiempos antes de iniciar.
+    let can_driver = embassy_stm32::can::Can::new(p.CAN1, p.PB8, p.PB9, can::Irqs);
+
     Bsp {
         usb_device: usb::init_usb(driver),
+        can_driver,
     }
 }

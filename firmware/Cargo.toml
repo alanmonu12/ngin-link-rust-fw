@@ -19,3 +19,4 @@ cortex-m.workspace = true
 # Dependencias a nuestros crates del workspace
 bsp-f446 = { path = "../crates/bsp-f446" }
 gs-usb-protocol = { path = "../crates/gs-usb-protocol" }
+can-protocol = { path = "../crates/can-protocol" }
