@@ -6,13 +6,13 @@ use embassy_stm32::rcc::{Hse, HseMode, Pll, APBPrescaler, PllSource, PllPreDiv, 
 use embassy_stm32::Config;
 
 /// Estructura que contiene todos los periféricos listos para usar por la aplicación
-pub struct Bsp {
-    pub usb_device: usb::BspUsbDevice,
+pub struct Board {
+    pub usb_driver: usb::BspUsbDriver,
     pub can_driver: can::BspCan,
 }
 
 /// Inicializa el microcontrolador y configura los relojes (RCC y PLL)
-pub fn init() -> Bsp {
+pub fn init() -> Board {
     let mut config = Config::default();
 
     config.rcc.hse = Some(Hse {
@@ -55,8 +55,8 @@ pub fn init() -> Bsp {
     // Esto es ideal, esperamos que el Host USB configure los tiempos antes de iniciar.
     let can_driver = embassy_stm32::can::Can::new(p.CAN1, p.PB8, p.PB9, can::Irqs);
 
-    Bsp {
-        usb_device: usb::init_usb(driver),
+    Board {
+        usb_driver: driver,
         can_driver,
     }
 }

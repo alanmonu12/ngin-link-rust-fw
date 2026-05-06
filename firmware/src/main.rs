@@ -5,6 +5,9 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_usb::{Builder, UsbDevice};
+use static_cell::StaticCell;
+use gs_usb_protocol::{default_gs_usb_config, handler::GsUsbControlHandler};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -12,18 +15,50 @@ use {defmt_rtt as _, panic_probe as _};
 // Usamos CriticalSectionRawMutex y una capacidad de 32 mensajes (ajustable según RAM/necesidad).
 static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, can_protocol::CanFrame, 32> = Channel::new();
 
+// Buffers de memoria estática que necesita el USB Builder
+static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+static MSOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+static CONTROL_HANDLER: StaticCell<GsUsbControlHandler> = StaticCell::new();
+
 // La macro #[embassy_executor::main] configura el entorno asíncrono por ti
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // 1. Inicializamos TODO el hardware a través del BSP (Relojes, pines, y construcción del USB)
     // Ahora `main.rs` no sabe si es un STM32, un RP2040, o un ESP32.
-    let bsp = bsp_f446::init();
+    let board = bsp_f446::init();
     info!("Hardware y relojes configurados. Iniciando driver USB...");
 
-    // 2. Lanzamos la tarea de fondo del USB
-    spawner.spawn(usb_task(bsp.usb_device).unwrap());
+    // 1.5. Construimos el dispositivo USB uniendo el driver del BSP con el protocolo
+    let config_usb = default_gs_usb_config();
+    let mut builder = Builder::new(
+        board.usb_driver,
+        config_usb,
+        CONFIG_DESC.init([0; 256]),
+        BOS_DESC.init([0; 256]),
+        MSOS_DESC.init([0; 256]),
+        CONTROL_BUF.init([0; 64]),
+    );
+
+    let control_handler = CONTROL_HANDLER.init(GsUsbControlHandler);
+    builder.handler(control_handler);
     
-    spawner.spawn(can_rx_task(bsp.can_driver).unwrap());
+    // Declaramos la interfaz de gs_usb
+    {
+        let mut function = builder.function(0xFF, 0xFF, 0xFF);
+        let mut interface = function.interface();
+        let mut alt_setting = interface.alt_setting(0xFF, 0xFF, 0xFF, None);
+        let _ep_in = alt_setting.endpoint_bulk_in(None, 64);
+        let _ep_out = alt_setting.endpoint_bulk_out(None, 64);
+    }
+
+    let usb_device = builder.build();
+
+    // 2. Lanzamos la tarea de fondo del USB
+    spawner.spawn(usb_task(usb_device).unwrap());
+    
+    spawner.spawn(can_rx_task(board.can_driver).unwrap());
     spawner.spawn(usb_tx_task().unwrap());
 
     info!("¡Sistema configurado y listo!");
@@ -35,7 +70,7 @@ async fn main(spawner: Spawner) {
 
 
 #[embassy_executor::task]
-async fn usb_task(mut usb: bsp_f446::usb::BspUsbDevice) -> ! {
+async fn usb_task(mut usb: UsbDevice<'static, bsp_f446::usb::BspUsbDriver>) -> ! {
     usb.run().await
 }
 
