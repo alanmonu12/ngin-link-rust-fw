@@ -21,3 +21,4 @@ cortex-m.workspace = true
 bsp-f446 = { path = "../crates/bsp-f446" }
 gs-usb-protocol = { path = "../crates/gs-usb-protocol" }
 can-protocol = { path = "../crates/can-protocol" }
+embassy-futures = "0.1.2"

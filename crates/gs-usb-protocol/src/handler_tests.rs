@@ -19,7 +19,7 @@ fn create_vendor_request(direction: Direction, request: u8, length: u16) -> Requ
 
 #[test]
 fn test_ignoramos_peticiones_no_vendor() {
-    let mut handler = GsUsbControlHandler;
+    let mut handler = GsUsbControlHandler::default();
     let req = Request {
         direction: Direction::In,
         request_type: RequestType::Standard, // No es Vendor
@@ -37,7 +37,7 @@ fn test_ignoramos_peticiones_no_vendor() {
 
 #[test]
 fn test_device_config_devuelve_valores_correctos() {
-    let mut handler = GsUsbControlHandler;
+    let mut handler = GsUsbControlHandler::default();
     let req = create_vendor_request(Direction::In, GS_USB_BREQ_DEVICE_CONFIG, 12);
     let mut buf = [0u8; 12];
 
@@ -56,7 +56,7 @@ fn test_device_config_devuelve_valores_correctos() {
 
 #[test]
 fn test_bt_const_devuelve_limites_correctos() {
-    let mut handler = GsUsbControlHandler;
+    let mut handler = GsUsbControlHandler::default();
     let req = create_vendor_request(Direction::In, GS_USB_BREQ_BT_CONST, 40);
     let mut buf = [0u8; 40];
 
@@ -72,7 +72,7 @@ fn test_bt_const_devuelve_limites_correctos() {
 
 #[test]
 fn test_out_mode_start_es_aceptado() {
-    let mut handler = GsUsbControlHandler;
+    let mut handler = GsUsbControlHandler::default();
     let req = create_vendor_request(Direction::Out, GS_USB_BREQ_MODE, 4);
     let buf = [1u8, 0, 0, 0];
 

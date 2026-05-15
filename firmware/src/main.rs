@@ -8,12 +8,31 @@ use embassy_sync::channel::Channel;
 use embassy_usb::{Builder, UsbDevice};
 use static_cell::StaticCell;
 use gs_usb_protocol::{default_gs_usb_config, handler::GsUsbControlHandler};
+use embassy_futures::select::{select, Either};
 
 use {defmt_rtt as _, panic_probe as _};
 
 // Cola (Channel) para comunicar la tarea del CAN (Productor) con la del USB (Consumidor).
 // Usamos CriticalSectionRawMutex y una capacidad de 32 mensajes (ajustable según RAM/necesidad).
 static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, can_protocol::CanFrame, 32> = Channel::new();
+
+// Canal de control para mandar los comandos de configuración del USB al CAN
+enum CanCommand {
+    Start,
+    Stop,
+    SetBitTiming(gs_usb_protocol::gs_usb_types::GsDeviceBitTiming),
+}
+static CAN_CTRL_CHANNEL: Channel<CriticalSectionRawMutex, CanCommand, 4> = Channel::new();
+
+fn on_start_cb() {
+    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Start);
+}
+fn on_stop_cb() {
+    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Stop);
+}
+fn on_bit_timing_cb(timing: gs_usb_protocol::gs_usb_types::GsDeviceBitTiming) {
+    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::SetBitTiming(timing));
+}
 
 // Buffers de memoria estática que necesita el USB Builder
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
@@ -41,7 +60,11 @@ async fn main(spawner: Spawner) {
         CONTROL_BUF.init([0; 64]),
     );
 
-    let control_handler = CONTROL_HANDLER.init(GsUsbControlHandler);
+    let control_handler = CONTROL_HANDLER.init(GsUsbControlHandler {
+        on_start: Some(on_start_cb),
+        on_stop: Some(on_stop_cb),
+        on_bit_timing: Some(on_bit_timing_cb),
+    });
     builder.handler(control_handler);
     
     // Declaramos la interfaz de gs_usb
@@ -78,37 +101,73 @@ async fn usb_task(mut usb: UsbDevice<'static, bsp_f446::usb::BspUsbDriver>) -> !
 // Tarea 1: Productor (Solo lee del hardware CAN lo más rápido posible)
 #[embassy_executor::task]
 async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
+    // El dispositivo arranca detenido esperando configuración del host (gs_usb)
+    let mut is_started = false;
+
     loop {
-        // 1. Esperamos asíncronamente a que llegue un mensaje del CAN
-        if let Ok(env) = can.read().await {
-            let rx_frame = env.frame;
-            
-            // Adaptamos usando la API de embassy_stm32
-            let id: u32 = match rx_frame.id() {
-                embassy_stm32::can::Id::Standard(std) => std.as_raw() as u32,
-                embassy_stm32::can::Id::Extended(ext) => ext.as_raw() as u32,
-            };
-            let is_extended = matches!(rx_frame.id(), embassy_stm32::can::Id::Extended(_));
-            
-            let mut data = [0u8; 8];
-            let payload = rx_frame.data();
-            let dlc = payload.len();
-            if dlc <= 8 {
-                data[..dlc].copy_from_slice(payload);
+        if is_started {
+            // Escuchamos comandos de control Y tramas del bus de forma simultánea
+            match select(CAN_CTRL_CHANNEL.receive(), can.inner.read()).await {
+                Either::First(cmd) => {
+                    match cmd {
+                        CanCommand::Stop => {
+                            info!("CAN: Apagando controlador por comando USB...");
+                            is_started = false;
+                            // El BSP se encarga de los detalles de hardware
+                            can.stop();
+                        }
+                        CanCommand::Start => info!("CAN: Ya estaba iniciado"),
+                        CanCommand::SetBitTiming(_) => info!("CAN: Debes hacer STOP antes de cambiar la velocidad"),
+                    }
+                }
+                Either::Second(Ok(env)) => {
+                    let rx_frame = env.frame;
+                    
+                    let id: u32 = match rx_frame.id() {
+                        embassy_stm32::can::Id::Standard(std) => std.as_raw() as u32,
+                        embassy_stm32::can::Id::Extended(ext) => ext.as_raw() as u32,
+                    };
+                    let is_extended = matches!(rx_frame.id(), embassy_stm32::can::Id::Extended(_));
+                    
+                    let mut data = [0u8; 8];
+                    let payload = rx_frame.data();
+                    let dlc = payload.len();
+                    if dlc <= 8 {
+                        data[..dlc].copy_from_slice(payload);
+                    }
+
+                    let generic_frame = can_protocol::CanFrame { id, is_extended, data, dlc: dlc as u8 };
+
+                    let decoded = can_protocol::analyze_frame(&generic_frame);
+                    match decoded {
+                        can_protocol::DecodedProtocol::Obd2Request(cmd) => defmt::info!("OBD2: {:?}", defmt::Debug2Format(&cmd)),
+                        can_protocol::DecodedProtocol::UdsMessage(msg) => defmt::info!("UDS: {:?}", defmt::Debug2Format(&msg)),
+                        can_protocol::DecodedProtocol::Raw => {} 
+                    }
+
+                    CAN_RX_CHANNEL.send(generic_frame).await;
+                }
+                Either::Second(Err(_)) => {} // Manejo opcional de errores del bus
             }
-
-            let generic_frame = can_protocol::CanFrame { id, is_extended, data, dlc: dlc as u8 };
-
-            // 2. Usamos nuestro analizador al vuelo para logs
-            let decoded = can_protocol::analyze_frame(&generic_frame);
-            match decoded {
-                can_protocol::DecodedProtocol::Obd2Request(cmd) => defmt::info!("OBD2: {:?}", defmt::Debug2Format(&cmd)),
-                can_protocol::DecodedProtocol::UdsMessage(msg) => defmt::info!("UDS: {:?}", defmt::Debug2Format(&msg)),
-                can_protocol::DecodedProtocol::Raw => {} // No loggeamos los miles de Raw
+        } else {
+            // Si estamos detenidos, solo esperamos comandos de control (bloqueante)
+            let cmd = CAN_CTRL_CHANNEL.receive().await;
+            match cmd {
+                CanCommand::Start => {
+                    info!("CAN: Iniciando controlador...");
+                    is_started = true;
+                    // El BSP encapsula cómo encender el periférico
+                    can.start();
+                }
+                CanCommand::Stop => info!("CAN: Ya estaba detenido"),
+                CanCommand::SetBitTiming(timing) => {
+                    info!("CAN: Configurando Bit Timing: brp={}, prop={}, phase1={}, phase2={}, sjw={}", 
+                        timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw);
+                    
+                    // Pasamos la configuración al BSP para que él manipule los registros bxCAN
+                    can.set_bit_timing(&timing);
+                }
             }
-
-            // 3. Enviamos a la cola para que la tarea del USB lo procese luego.
-            CAN_RX_CHANNEL.send(generic_frame).await;
         }
     }
 }

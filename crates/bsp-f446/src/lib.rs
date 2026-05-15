@@ -53,10 +53,10 @@ pub fn init() -> Board {
     // Al crear el objeto `Can`, Embassy configura los pines y los relojes y
     // deja por defecto al bxCAN en "Initialization mode" (sin acoplarse al bus).
     // Esto es ideal, esperamos que el Host USB configure los tiempos antes de iniciar.
-    let can_driver = embassy_stm32::can::Can::new(p.CAN1, p.PB8, p.PB9, can::Irqs);
+    let can_p = embassy_stm32::can::Can::new(p.CAN1, p.PB8, p.PB9, can::Irqs);
 
     Board {
         usb_driver: driver,
-        can_driver,
+        can_driver: can::BspCan { inner: can_p},
     }
 }

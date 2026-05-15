@@ -12,7 +12,12 @@ use embassy_usb::Handler;
 use crate::gs_usb_types::*;
 
 /// Estructura que maneja los Control Transfers del protocolo gs_usb
-pub struct GsUsbControlHandler;
+#[derive(Default)]
+pub struct GsUsbControlHandler {
+    pub on_start: Option<fn()>,
+    pub on_stop: Option<fn()>,
+    pub on_bit_timing: Option<fn(GsDeviceBitTiming)>,
+}
 
 impl Handler for GsUsbControlHandler {
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
@@ -80,11 +85,14 @@ impl Handler for GsUsbControlHandler {
         match req.request {
             GS_USB_BREQ_BITTIMING => {
                 if buf.len() >= core::mem::size_of::<GsDeviceBitTiming>() {
-                    let _timing: GsDeviceBitTiming = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsDeviceBitTiming>()]);
+                    let timing: GsDeviceBitTiming = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsDeviceBitTiming>()]);
                     info!(
                         "[USB] Nuevo Bit Timing recibido: brp={}, prop_seg={}, phase1={}, phase2={}, sjw={}",
-                        _timing.brp, _timing.prop_seg, _timing.phase_seg1, _timing.phase_seg2, _timing.sjw
+                        timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw
                     );
+                    if let Some(cb) = self.on_bit_timing {
+                        cb(timing);
+                    }
                 }
                 return Some(OutResponse::Accepted);
             }
@@ -96,8 +104,14 @@ impl Handler for GsUsbControlHandler {
                     let mode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                     if (mode & 1) == 1 { // Chequeamos el bit de START/STOP
                         info!("[USB] Comando START recibido");
+                        if let Some(cb) = self.on_start {
+                            cb();
+                        }
                     } else {
                         info!("[USB] Comando STOP recibido");
+                        if let Some(cb) = self.on_stop {
+                            cb();
+                        }
                     }
                 }
                 return Some(OutResponse::Accepted);
