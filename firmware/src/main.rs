@@ -107,7 +107,7 @@ async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
     loop {
         if is_started {
             // Escuchamos comandos de control Y tramas del bus de forma simultánea
-            match select(CAN_CTRL_CHANNEL.receive(), can.inner.read()).await {
+            match select(CAN_CTRL_CHANNEL.receive(), can.can.read()).await {
                 Either::First(cmd) => {
                     match cmd {
                         CanCommand::Stop => {

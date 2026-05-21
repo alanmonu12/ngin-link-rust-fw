@@ -57,6 +57,6 @@ pub fn init() -> Board {
 
     Board {
         usb_driver: driver,
-        can_driver: can::BspCan { inner: can_p},
+        can_driver: can::BspCan { can: can_p},
     }
 }

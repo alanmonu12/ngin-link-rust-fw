@@ -12,7 +12,7 @@ bind_interrupts!(pub struct Irqs {
 
 pub struct BspCan {
     // Hacemos el campo público para que lib.rs pueda inicializarlo al instanciar el Board.
-    pub inner: Can<'static>,
+    pub can: Can<'static>,
 }
 
 impl BspCan {
@@ -21,7 +21,7 @@ impl BspCan {
         // Para "encender", devolvemos el bus a su modo de operación normal.
         // En la API bxCAN de Embassy, la función modify_config automáticamente entra en modo 
         // de inicialización (Init) temporalmente y vuelve al modo normal al terminar el closure.
-        self.inner.modify_config()
+        self.can.modify_config()
             .set_silent(false)
             .set_loopback(false);
     }
@@ -30,7 +30,7 @@ impl BspCan {
         // Para simular que el bus está "detenido" sin desconfigurar el hardware completo,
         // lo ponemos en modo silencioso (Listen-only/Silent). De este modo no acusa recibo (ACK)
         // ni interfiere físicamente con otros dispositivos en la red CAN.
-        self.inner.modify_config()
+        self.can.modify_config()
             .set_silent(true);
     }
 
@@ -41,12 +41,12 @@ impl BspCan {
         // Usamos .max(1) para garantizar que los valores NonZero nunca sean 0 y evitar pánicos.
         let bt = embassy_stm32::can::util::NominalBitTiming {
             sync_jump_width: core::num::NonZeroU8::new((timing.sjw as u8).max(1)).unwrap(),
-            seg1: core::num::NonZeroU8::new((timing.prop_seg + timing.phase_seg1) as u8).unwrap(),
-            seg2: core::num::NonZeroU8::new(timing.phase_seg2 as u8).unwrap(),
+            seg1: core::num::NonZeroU8::new(((timing.prop_seg + timing.phase_seg1) as u8).max(1)).unwrap(),
+            seg2: core::num::NonZeroU8::new((timing.phase_seg2 as u8).max(1)).unwrap(),
             prescaler: core::num::NonZeroU16::new((timing.brp as u16).max(1)).unwrap(),
         };
 
-        self.inner.modify_config()
+        self.can.modify_config()
             .set_bit_timing(bt);
     }
 }
