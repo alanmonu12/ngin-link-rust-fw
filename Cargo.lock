@@ -835,6 +835,7 @@ name = "ngin-link-firmware"
 version = "0.1.0"
 dependencies = [
  "bsp-f446",
+ "bytemuck",
  "can-protocol",
  "cortex-m",
  "cortex-m-rt",

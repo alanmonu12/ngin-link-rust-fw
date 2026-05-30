@@ -6,9 +6,11 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_usb::{Builder, UsbDevice};
+use embassy_usb::driver::{Endpoint, EndpointIn, EndpointOut};
 use static_cell::StaticCell;
 use gs_usb_protocol::{default_gs_usb_config, handler::GsUsbControlHandler};
-use embassy_futures::select::{select, Either};
+use gs_usb_protocol::gs_usb_types::{GsHostFrame, GsTxMsg};
+use embassy_futures::select::{select, select3, Either, Either3};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -23,6 +25,18 @@ enum CanCommand {
     SetBitTiming(gs_usb_protocol::gs_usb_types::GsDeviceBitTiming),
 }
 static CAN_CTRL_CHANNEL: Channel<CriticalSectionRawMutex, CanCommand, 4> = Channel::new();
+
+struct CanTxRequest {
+    echo_id: u32,
+    id: u32,
+    is_extended: bool,
+    is_rtr: bool,
+    data: [u8; 8],
+    dlc: u8,
+}
+static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanTxRequest, 16> = Channel::new();
+
+static USB_ECHO_CHANNEL: Channel<CriticalSectionRawMutex, GsHostFrame, 16> = Channel::new();
 
 fn on_start_cb() {
     let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Start);
@@ -67,14 +81,15 @@ async fn main(spawner: Spawner) {
     });
     builder.handler(control_handler);
     
-    // Declaramos la interfaz de gs_usb
-    {
+    // Declaramos la interfaz de gs_usb y obtenemos los endpoints
+    let (ep_in, ep_out) = {
         let mut function = builder.function(0xFF, 0xFF, 0xFF);
         let mut interface = function.interface();
         let mut alt_setting = interface.alt_setting(0xFF, 0xFF, 0xFF, None);
-        let _ep_in = alt_setting.endpoint_bulk_in(None, 64);
-        let _ep_out = alt_setting.endpoint_bulk_out(None, 64);
-    }
+        let ep_in = alt_setting.endpoint_bulk_in(None, 64);
+        let ep_out = alt_setting.endpoint_bulk_out(None, 64);
+        (ep_in, ep_out)
+    };
 
     let usb_device = builder.build();
 
@@ -82,7 +97,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_task(usb_device).unwrap());
     
     spawner.spawn(can_rx_task(board.can_driver).unwrap());
-    spawner.spawn(usb_tx_task().unwrap());
+    spawner.spawn(usb_tx_task(ep_in).unwrap());
+    spawner.spawn(usb_rx_task(ep_out).unwrap());
 
     info!("¡Sistema configurado y listo!");
 
@@ -98,29 +114,26 @@ async fn usb_task(mut usb: UsbDevice<'static, bsp_f446::usb::BspUsbDriver>) -> !
 }
 
 
-// Tarea 1: Productor (Solo lee del hardware CAN lo más rápido posible)
+// Tarea 1: Productor (Lee del hardware CAN y transmite tramas desde el host)
 #[embassy_executor::task]
 async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
-    // El dispositivo arranca detenido esperando configuración del host (gs_usb)
     let mut is_started = false;
 
     loop {
         if is_started {
-            // Escuchamos comandos de control Y tramas del bus de forma simultánea
-            match select(CAN_CTRL_CHANNEL.receive(), can.can.read()).await {
-                Either::First(cmd) => {
+            match select3(CAN_CTRL_CHANNEL.receive(), can.can.read(), CAN_TX_CHANNEL.receive()).await {
+                Either3::First(cmd) => {
                     match cmd {
                         CanCommand::Stop => {
                             info!("CAN: Apagando controlador por comando USB...");
                             is_started = false;
-                            // El BSP se encarga de los detalles de hardware
                             can.stop();
                         }
                         CanCommand::Start => info!("CAN: Ya estaba iniciado"),
                         CanCommand::SetBitTiming(_) => info!("CAN: Debes hacer STOP antes de cambiar la velocidad"),
                     }
                 }
-                Either::Second(Ok(env)) => {
+                Either3::Second(Ok(env)) => {
                     let rx_frame = env.frame;
                     
                     let id: u32 = match rx_frame.id() {
@@ -147,24 +160,38 @@ async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
 
                     CAN_RX_CHANNEL.send(generic_frame).await;
                 }
-                Either::Second(Err(_)) => {} // Manejo opcional de errores del bus
+                Either3::Second(Err(_)) => {}
+                Either3::Third(tx_req) => {
+                    let data_slice = &tx_req.data[..tx_req.dlc as usize];
+                    match can.transmit(tx_req.id, tx_req.is_extended, tx_req.is_rtr, data_slice).await {
+                        Ok(()) => {
+                            let echo_frame = GsHostFrame::from_tx_msg_echo(
+                                tx_req.echo_id,
+                                tx_req.id,
+                                tx_req.is_extended,
+                                tx_req.dlc,
+                                &tx_req.data,
+                            );
+                            let _ = USB_ECHO_CHANNEL.try_send(echo_frame);
+                        }
+                        Err(e) => {
+                            error!("CAN TX: Error al transmitir: {:?}", defmt::Debug2Format(&e));
+                        }
+                    }
+                }
             }
         } else {
-            // Si estamos detenidos, solo esperamos comandos de control (bloqueante)
             let cmd = CAN_CTRL_CHANNEL.receive().await;
             match cmd {
                 CanCommand::Start => {
                     info!("CAN: Iniciando controlador...");
                     is_started = true;
-                    // El BSP encapsula cómo encender el periférico
                     can.start();
                 }
                 CanCommand::Stop => info!("CAN: Ya estaba detenido"),
                 CanCommand::SetBitTiming(timing) => {
                     info!("CAN: Configurando Bit Timing: brp={}, prop={}, phase1={}, phase2={}, sjw={}", 
                         timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw);
-                    
-                    // Pasamos la configuración al BSP para que él manipule los registros bxCAN
                     can.set_bit_timing(&timing);
                 }
             }
@@ -172,15 +199,66 @@ async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
     }
 }
 
-// Tarea 2: Consumidor (Saca de la cola y en el futuro escribirá al USB)
+// Tarea 2: Consumidor USB TX — Envía tramas CAN al host (RX del bus + echoes de TX)
 #[embassy_executor::task]
-async fn usb_tx_task(/* mut usb_in_ep: BulkInEndpoint ... */) {
+async fn usb_tx_task(mut ep_in: bsp_f446::usb::BspUsbEndpointIn) {
+    ep_in.wait_enabled().await;
+    info!("USB TX: Endpoint IN habilitado, listo para enviar tramas al host");
+
     loop {
-        // Esperamos dormidos a que la tarea del CAN RX meta algo en la cola
-        let _frame = CAN_RX_CHANNEL.receive().await;
-        
-        // (Por ahora no hacemos nada más. En el futuro armaremos GsHostFrame y mandaremos a la PC)
+        let host_frame = match select(CAN_RX_CHANNEL.receive(), USB_ECHO_CHANNEL.receive()).await {
+            Either::First(frame) => {
+                GsHostFrame::from_can_frame(frame.id, frame.is_extended, frame.dlc, &frame.data)
+            }
+            Either::Second(echo_frame) => echo_frame,
+        };
+
+        let bytes = bytemuck::bytes_of(&host_frame);
+
+        match ep_in.write(bytes).await {
+            Ok(()) => {}
+            Err(e) => {
+                error!("USB TX: Error al escribir al endpoint: {:?}", defmt::Debug2Format(&e));
+            }
+        }
     }
 }
 
-// firmware/src/main.rs
+// Tarea 3: USB RX — Lee tramas del host por Bulk OUT y las envía al bus CAN
+#[embassy_executor::task]
+async fn usb_rx_task(mut ep_out: bsp_f446::usb::BspUsbEndpointOut) {
+    ep_out.wait_enabled().await;
+    info!("USB RX: Endpoint OUT habilitado, listo para recibir tramas del host");
+
+    let mut buf = [0u8; 64];
+    loop {
+        match ep_out.read(&mut buf).await {
+            Ok(n) if n >= core::mem::size_of::<GsTxMsg>() => {
+                let tx_msg: GsTxMsg = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsTxMsg>()]);
+                
+                let dlc = tx_msg.dlc();
+                let tx_req = CanTxRequest {
+                    echo_id: tx_msg.echo_id,
+                    id: tx_msg.id(),
+                    is_extended: tx_msg.is_extended(),
+                    is_rtr: tx_msg.is_rtr(),
+                    data: tx_msg.data,
+                    dlc,
+                };
+
+                match CAN_TX_CHANNEL.try_send(tx_req) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        warn!("USB RX: Cola CAN TX llena, descartando trama");
+                    }
+                }
+            }
+            Ok(n) => {
+                warn!("USB RX: Trama incompleta ({} bytes, esperados {})", n, core::mem::size_of::<GsTxMsg>());
+            }
+            Err(e) => {
+                error!("USB RX: Error al leer del endpoint: {:?}", defmt::Debug2Format(&e));
+            }
+        }
+    }
+}

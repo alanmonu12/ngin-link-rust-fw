@@ -49,4 +49,30 @@ impl BspCan {
         self.can.modify_config()
             .set_bit_timing(bt);
     }
+
+    pub async fn transmit(&mut self, id: u32, is_extended: bool, is_rtr: bool, data: &[u8]) -> Result<(), embassy_stm32::can::enums::FrameCreateError> {
+        use embassy_stm32::can::{Id, StandardId, ExtendedId, Frame};
+        use embassy_stm32::can::enums::FrameCreateError;
+
+        let can_id = if is_extended {
+            match ExtendedId::new(id) {
+                Some(eid) => Id::Extended(eid),
+                None => return Err(FrameCreateError::InvalidCanId),
+            }
+        } else {
+            match StandardId::new(id as u16) {
+                Some(sid) => Id::Standard(sid),
+                None => return Err(FrameCreateError::InvalidCanId),
+            }
+        };
+
+        let frame = if is_rtr {
+            Frame::new_remote(can_id, data.len())?
+        } else {
+            Frame::new_data(can_id, data)?
+        };
+
+        self.can.write(&frame).await;
+        Ok(())
+    }
 }
