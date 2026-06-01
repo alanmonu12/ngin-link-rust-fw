@@ -54,9 +54,18 @@ pub const GS_USB_FLAG_TX_ECHO: u8 = 1 << 0;   // Echo de transmisión
 ### Features
 
 ```rust
-pub const GS_CAN_FEATURE_LISTEN_ONLY: u32 = 1 << 1;  // Solo escucha (no ACK)
-pub const GS_CAN_FEATURE_LOOP_BACK: u32 = 1 << 2;    // Modo loopback interno
+pub const GS_CAN_FEATURE_LISTEN_ONLY: u32 = 1 << 0;  // Solo escucha (no ACK)
+pub const GS_CAN_FEATURE_LOOP_BACK: u32 = 1 << 1;    // Modo loopback interno
+pub const GS_CAN_FEATURE_TRIPLE_SAMPLE: u32 = 1 << 2;
+pub const GS_CAN_FEATURE_ONE_SHOT: u32 = 1 << 3;
+pub const GS_CAN_FEATURE_HW_TIMESTAMP: u32 = 1 << 4;
+pub const GS_CAN_FEATURE_IDENTIFY: u32 = 1 << 5;
+pub const GS_CAN_FEATURE_USER_ID: u32 = 1 << 6;
+pub const GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE: u32 = 1 << 7;
+pub const GS_CAN_FEATURE_FD: u32 = 1 << 8;
 ```
+
+Las posiciones de bit coinciden con `include/uapi/linux/can/gs_usb.h` del kernel Linux — un test (`test_feature_flags_coinciden_con_kernel_linux`) fija estos valores para evitar drift.
 
 ## Structs
 
@@ -214,6 +223,44 @@ impl GsTxMsg {
     pub fn dlc(&self) -> u8;            // DLC con límite de 8
 }
 ```
+
+### GsIdentifyMode
+
+**Dirección:** Host → Device (control_out)
+**BREQ:** `GS_USB_BREQ_IDENTIFY` (7)
+
+```rust
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default, PartialEq, Eq)]
+pub struct GsIdentifyMode {
+    pub mode: u32,
+}
+```
+
+**Tamaño:** 4 bytes
+
+Valores válidos:
+- `0` (`GsIdentifyMode::OFF`) — apagar LED de identificación
+- `1` (`GsIdentifyMode::ON`) — encender LED
+
+El handler solo invoca el callback `on_identify(bool)` si la feature `GS_CAN_FEATURE_IDENTIFY` está activa en `capabilities` — esto previene activar hardware que no existe.
+
+### GsDeviceCapabilities
+
+**Dirección:** Device → Host (control_in)
+**BREQ:** `GS_USB_BREQ_DEV_CAPABILITIES` (11) — *no estándar, no usado por el driver `gs_usb` del kernel*
+
+```rust
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default, PartialEq, Eq)]
+pub struct GsDeviceCapabilities {
+    pub feature: u32,
+}
+```
+
+**Tamaño:** 4 bytes
+
+Mismo bitfield de features que `GsDeviceBtConst::feature` (ver tabla de Features arriba). Pensado para exponer capacidades por un endpoint dedicado sin tener que pedir el BT_CONST de 40 bytes. El firmware lo popula con `with_feature(...)` encadenable.
 
 ## Layout de Bits - can_id
 

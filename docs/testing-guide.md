@@ -23,9 +23,9 @@ cargo test -p gs-usb-protocol --target x86_64-unknown-linux-gnu
 
 ### 2. Tests de Integración (MCU)
 
-Tests que requieren hardware MCU real.
+Tests que requieren hardware MCU real (probe-rs, sniffer, carga de tráfico en bus real).
 
-**Estado:** Pendiente para Fase 3
+**Estado:** Pendiente — dependen de disponibilidad de hardware y herramientas de carga (candump, busmaster).
 
 ### 3. Tests Manuales
 

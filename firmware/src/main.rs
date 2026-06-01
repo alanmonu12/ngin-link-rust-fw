@@ -9,7 +9,10 @@ use embassy_usb::{Builder, UsbDevice};
 use embassy_usb::driver::{Endpoint, EndpointIn, EndpointOut};
 use static_cell::StaticCell;
 use gs_usb_protocol::{default_gs_usb_config, handler::GsUsbControlHandler};
-use gs_usb_protocol::gs_usb_types::{GsHostFrame, GsTxMsg};
+use gs_usb_protocol::gs_usb_types::{
+    GsDeviceCapabilities, GsHostFrame, GsTxMsg, GS_CAN_FEATURE_IDENTIFY, GS_CAN_FEATURE_LISTEN_ONLY,
+    GS_CAN_FEATURE_LOOP_BACK, GS_CAN_FEATURE_USER_ID,
+};
 use embassy_futures::select::{select, select3, Either, Either3};
 
 use {defmt_rtt as _, panic_probe as _};
@@ -48,6 +51,24 @@ fn on_bit_timing_cb(timing: gs_usb_protocol::gs_usb_types::GsDeviceBitTiming) {
     let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::SetBitTiming(timing));
 }
 
+/// Callback para `GS_USB_BREQ_IDENTIFY`: enciende/apaga el LED de
+/// identificación. Por ahora solo loggeamos porque el hardware actual
+/// no tiene un LED cableado; cuando se agregue el GPIO, esta función
+/// debe llamar a `led.set_state(on)`.
+fn on_identify_cb(on: bool) {
+    if on {
+        info!("IDENTIFY: LED encendido");
+    } else {
+        info!("IDENTIFY: LED apagado");
+    }
+}
+
+/// Fuente de tiempo para `GS_USB_BREQ_TIMESTAMP`.
+/// Devuelve milisegundos desde el boot, truncados a u32 (~49.7 días).
+fn now_ms() -> u32 {
+    embassy_time::Instant::now().as_millis() as u32
+}
+
 // Buffers de memoria estática que necesita el USB Builder
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
@@ -78,6 +99,14 @@ async fn main(spawner: Spawner) {
         on_start: Some(on_start_cb),
         on_stop: Some(on_stop_cb),
         on_bit_timing: Some(on_bit_timing_cb),
+        on_identify: Some(on_identify_cb),
+        now_ms,
+        user_id: 0,
+        capabilities: GsDeviceCapabilities::default()
+            .with_feature(GS_CAN_FEATURE_LISTEN_ONLY)
+            .with_feature(GS_CAN_FEATURE_LOOP_BACK)
+            .with_feature(GS_CAN_FEATURE_IDENTIFY)
+            .with_feature(GS_CAN_FEATURE_USER_ID),
     });
     builder.handler(control_handler);
     

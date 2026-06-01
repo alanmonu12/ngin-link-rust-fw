@@ -56,6 +56,20 @@ Cuando el usuario ejecuta `sudo ip link set can0 up`, el driver gs_usb realiza e
 
 4. **`GS_USB_BREQ_MODE` (STOP=0)`** — Detiene el CAN. Útil para reconfigurar o apagar.
 
+### Comandos adicionales soportados
+
+Además de los BREQ requeridos por el driver del kernel, el handler implementa:
+
+| BREQ | Tipo | Payload | Comportamiento |
+|------|------|---------|----------------|
+| `GS_USB_BREQ_TIMESTAMP` (6) | IN | u32 LE (ms desde boot) | Lee de `handler.now_ms()` — el firmware inyecta `embassy_time::Instant::now().as_millis() as u32` |
+| `GS_USB_BREQ_IDENTIFY` (7) | OUT | `GsIdentifyMode` (u32) | Invoca `on_identify(true\|false)` **solo si** `capabilities` incluye `GS_CAN_FEATURE_IDENTIFY` |
+| `GS_USB_BREQ_GET_USER_ID` (8) | IN | u32 LE | Devuelve `handler.user_id` |
+| `GS_USB_BREQ_SET_USER_ID` (9) | OUT | u32 LE | Actualiza `handler.user_id` |
+| `GS_USB_BREQ_DEV_CAPABILITIES` (11) | IN | `GsDeviceCapabilities` (4 B) | Endpoint no estándar; reporta el mismo bitfield de features que `BT_CONST` por un canal dedicado |
+
+Si el host pide un BREQ no manejado o un BREQ con tipo no-vendor, el handler devuelve `None` para que el stack USB genere un STALL.
+
 ### Por qué usar canales para control
 
 Los callbacks de USB corren en **contexto de interrupción**. No pueden hacer `await` (bloquear). Por eso usan `try_send()`: si la cola está llena, descarta silenciosamente. Para comandos esporádicos como start/stop esto es aceptable — la probabilidad de perder un comando es despreciable.

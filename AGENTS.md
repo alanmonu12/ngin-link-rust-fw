@@ -79,20 +79,23 @@ Host USB → gs_usb control transfer → GsUsbControlHandler
 - gs_usb protocol: handler de control transfers, tipos C-repr, config USB
 - can-protocol: CanFrame, decodificador OBD2 y UDS (sniffer básico)
 - Tarea can_rx_task: recibe tramas CAN, las decodifica, envía por canal
+- Tarea usb_tx_task: envía GsHostFrame por Bulk IN (RX del bus + echoes de TX)
+- Tarea usb_rx_task: lee GsTxMsg por Bulk OUT y los enruta a CAN_TX_CHANNEL
+- Bucle de transmisión CAN (can_rx_task con `select3` para RX / CTRL / TX)
 - Canal de control USB→CAN para start/stop/bit_timing
-- Tests unitarios para gs_usb_handler y can-protocol (corren en host)
+- Comandos gs_usb soportados: TIMESTAMP, IDENTIFY, GET/SET_USER_ID, DEV_CAPABILITIES
+- 57 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host)
 
 ### Pendiente / TODO
-- **usb_tx_task:** No envía tramas al host aún (solo lee del canal)
-- **USB Bulk IN endpoint:** No está configurado para enviar datos
-- **USB Bulk OUT endpoint:** No existe接收 comandos de trama desde el host
-- **Transmisión CAN:** No hay tarea para enviar tramas CAN desde el host
 - **CAN FD:** No soportado aún
-- **Timestamps:** No implementados en tramas USB
-- **Filtros CAN:** No hay configuración de filtros de recepción
-- **Error handling en USB:** Falta manejo robusto de errores USB
-- **LEDs/Indicadores:** No implementados
+- **Timestamps en GsHostFrame:** El timestamp se expone por control transfer, no embebido en cada frame
+- **Filtros CAN:** No hay configuración de filtros de aceptación
+- **ISO-TP multi-frame:** Solo se decodifican Single Frames
+- **OBD2 response parsing:** Solo requests
+- **UDS sub-function/DID:** Parsing parcial
+- **LEDs/Indicadores:** Callback `on_identify` existe pero el GPIO no está cableado
 - **Watchdog:** No implementado
+- **Persistencia de user_id:** Solo vive en RAM; no se guarda en flash
 
 ## Convenciones del Proyecto
 - Código en español (comentarios, nombres de variables, commits)

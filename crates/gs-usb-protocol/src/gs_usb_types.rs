@@ -18,7 +18,7 @@ pub struct GsDeviceConfig {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GsDeviceBtConst {
-    /// Supported features: GS_CAN_FEATURE_LISTEN_ONLY, GS_CAN_FEATURE_LOOP_BACK, etc.
+    /// Supported features: bitfield of `GS_CAN_FEATURE_*`
     pub feature: u32,
     /// The clock frequency of the CAN peripheral in Hz.
     pub fclk_can: u32,
@@ -44,9 +44,66 @@ pub struct GsDeviceBitTiming {
     pub brp: u32,
 }
 
+/// Modes supported by `GS_USB_BREQ_IDENTIFY` (control OUT).
+/// El host envía uno de estos valores para encender/apagar el LED de identificación.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default, PartialEq, Eq)]
+pub struct GsIdentifyMode {
+    pub mode: u32,
+}
+
+impl GsIdentifyMode {
+    pub const OFF: u32 = 0;
+    pub const ON: u32 = 1;
+
+    pub fn is_on(&self) -> bool {
+        self.mode == Self::ON
+    }
+
+    pub fn is_off(&self) -> bool {
+        self.mode == Self::OFF
+    }
+}
+
+/// Capacidades reportadas por `GS_USB_BREQ_DEV_CAPABILITIES` (control IN).
+///
+/// Es un endpoint **no estándar** (no lo usa el driver `gs_usb` del kernel de Linux)
+/// pero lo definimos para exponer las capacidades del firmware de forma
+/// independiente de `GS_USB_BREQ_BT_CONST`. Mismo bitfield que
+/// `GsDeviceBtConst::feature` para mantener consistencia.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default, PartialEq, Eq)]
+pub struct GsDeviceCapabilities {
+    pub feature: u32,
+}
+
+impl GsDeviceCapabilities {
+    /// Acumula un bitfield de features encadenando llamadas.
+    /// Usa OR para preservar los bits ya seteados.
+    pub fn with_feature(mut self, feature: u32) -> Self {
+        self.feature |= feature;
+        self
+    }
+
+    /// Devuelve `true` si **todos** los bits pedidos están presentes.
+    /// Pedir `feature = 0` siempre devuelve `false` para evitar matches accidentales.
+    pub fn supports(&self, feature: u32) -> bool {
+        feature != 0 && (self.feature & feature) == feature
+    }
+}
+
 // Supported features for GsDeviceBtConst.feature
-pub const GS_CAN_FEATURE_LISTEN_ONLY: u32 = 1 << 1;
-pub const GS_CAN_FEATURE_LOOP_BACK: u32 = 1 << 2;
+// Las posiciones de bit coinciden con el driver gs_usb del kernel de Linux
+// (include/uapi/linux/can/gs_usb.h). No cambiar sin actualizar la spec.
+pub const GS_CAN_FEATURE_LISTEN_ONLY: u32 = 1 << 0;
+pub const GS_CAN_FEATURE_LOOP_BACK: u32 = 1 << 1;
+pub const GS_CAN_FEATURE_TRIPLE_SAMPLE: u32 = 1 << 2;
+pub const GS_CAN_FEATURE_ONE_SHOT: u32 = 1 << 3;
+pub const GS_CAN_FEATURE_HW_TIMESTAMP: u32 = 1 << 4;
+pub const GS_CAN_FEATURE_IDENTIFY: u32 = 1 << 5;
+pub const GS_CAN_FEATURE_USER_ID: u32 = 1 << 6;
+pub const GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE: u32 = 1 << 7;
+pub const GS_CAN_FEATURE_FD: u32 = 1 << 8;
 
 // Vendor requests (BREQ) from host to device
 pub const GS_USB_BREQ_HOST_FORMAT: u8 = 0;
@@ -381,5 +438,110 @@ mod tests {
 
         assert_eq!(msg.id(), GS_CAN_ID_MASK_EFF);
         assert!(msg.is_extended());
+    }
+
+    // Tests para GsIdentifyMode
+
+    #[test]
+    fn test_identify_mode_tamaño_es_4_bytes() {
+        assert_eq!(core::mem::size_of::<GsIdentifyMode>(), 4);
+    }
+
+    #[test]
+    fn test_identify_mode_off() {
+        let m = GsIdentifyMode { mode: GsIdentifyMode::OFF };
+        assert!(m.is_off());
+        assert!(!m.is_on());
+    }
+
+    #[test]
+    fn test_identify_mode_on() {
+        let m = GsIdentifyMode { mode: GsIdentifyMode::ON };
+        assert!(m.is_on());
+        assert!(!m.is_off());
+    }
+
+    #[test]
+    fn test_identify_mode_default_es_off() {
+        let m = GsIdentifyMode::default();
+        assert_eq!(m.mode, 0);
+        assert!(m.is_off());
+    }
+
+    #[test]
+    fn test_identify_mode_serializacion() {
+        // Layout little-endian esperado por el host.
+        let m = GsIdentifyMode { mode: 1 };
+        let bytes = bytemuck::bytes_of(&m);
+        assert_eq!(bytes, &[0x01, 0x00, 0x00, 0x00]);
+    }
+
+    // Tests para GsDeviceCapabilities
+
+    #[test]
+    fn test_device_capabilities_tamaño_es_4_bytes() {
+        assert_eq!(core::mem::size_of::<GsDeviceCapabilities>(), 4);
+    }
+
+    #[test]
+    fn test_device_capabilities_default() {
+        let caps = GsDeviceCapabilities::default();
+        assert_eq!(caps.feature, 0);
+        assert!(!caps.supports(GS_CAN_FEATURE_LISTEN_ONLY));
+    }
+
+    #[test]
+    fn test_device_capabilities_with_feature() {
+        let caps = GsDeviceCapabilities::default()
+            .with_feature(GS_CAN_FEATURE_LISTEN_ONLY)
+            .with_feature(GS_CAN_FEATURE_IDENTIFY);
+        assert_eq!(caps.feature, GS_CAN_FEATURE_LISTEN_ONLY | GS_CAN_FEATURE_IDENTIFY);
+    }
+
+    #[test]
+    fn test_device_capabilities_supports() {
+        let caps = GsDeviceCapabilities {
+            feature: GS_CAN_FEATURE_LOOP_BACK | GS_CAN_FEATURE_FD | GS_CAN_FEATURE_USER_ID,
+        };
+        assert!(caps.supports(GS_CAN_FEATURE_LOOP_BACK));
+        assert!(caps.supports(GS_CAN_FEATURE_FD));
+        assert!(caps.supports(GS_CAN_FEATURE_USER_ID));
+        assert!(!caps.supports(GS_CAN_FEATURE_LISTEN_ONLY));
+        assert!(!caps.supports(GS_CAN_FEATURE_IDENTIFY));
+    }
+
+    #[test]
+    fn test_device_capabilities_supports_combinacion() {
+        // supports() requiere que TODOS los bits pedidos estén presentes.
+        let caps = GsDeviceCapabilities {
+            feature: GS_CAN_FEATURE_LOOP_BACK | GS_CAN_FEATURE_FD,
+        };
+        assert!(!caps.supports(GS_CAN_FEATURE_LOOP_BACK | GS_CAN_FEATURE_IDENTIFY));
+    }
+
+    #[test]
+    fn test_device_capabilities_supports_cero_retorna_false() {
+        // Pedir feature 0 siempre devuelve false para evitar matches accidentales.
+        let caps = GsDeviceCapabilities {
+            feature: GS_CAN_FEATURE_LOOP_BACK,
+        };
+        assert!(!caps.supports(0));
+    }
+
+    // Tests para verificar que los feature flags coinciden con el kernel Linux.
+
+    #[test]
+    fn test_feature_flags_coinciden_con_kernel_linux() {
+        // Bitfield del kernel: include/uapi/linux/can/gs_usb.h
+        // Si esto cambia, hay que actualizar también el driver del kernel.
+        assert_eq!(GS_CAN_FEATURE_LISTEN_ONLY, 1 << 0);
+        assert_eq!(GS_CAN_FEATURE_LOOP_BACK, 1 << 1);
+        assert_eq!(GS_CAN_FEATURE_TRIPLE_SAMPLE, 1 << 2);
+        assert_eq!(GS_CAN_FEATURE_ONE_SHOT, 1 << 3);
+        assert_eq!(GS_CAN_FEATURE_HW_TIMESTAMP, 1 << 4);
+        assert_eq!(GS_CAN_FEATURE_IDENTIFY, 1 << 5);
+        assert_eq!(GS_CAN_FEATURE_USER_ID, 1 << 6);
+        assert_eq!(GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE, 1 << 7);
+        assert_eq!(GS_CAN_FEATURE_FD, 1 << 8);
     }
 }
