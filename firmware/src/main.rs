@@ -13,7 +13,7 @@ use gs_usb_protocol::gs_usb_types::{
     GsDeviceCapabilities, GsHostFrame, GsTxMsg, GS_CAN_FEATURE_IDENTIFY, GS_CAN_FEATURE_LISTEN_ONLY,
     GS_CAN_FEATURE_LOOP_BACK, GS_CAN_FEATURE_USER_ID,
 };
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{select, Either};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -21,14 +21,18 @@ use {defmt_rtt as _, panic_probe as _};
 // Usamos CriticalSectionRawMutex y una capacidad de 32 mensajes (ajustable según RAM/necesidad).
 static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, can_protocol::CanFrame, 32> = Channel::new();
 
-// Canal de control para mandar los comandos de configuración del USB al CAN
-enum CanCommand {
+/// Comandos que otras tareas pueden enviar al único actor que maneja el driver CAN.
+/// Unificamos control (Start/Stop/SetBitTiming) y transmisión en un solo canal
+/// para simplificar el bucle del driver y evitar un `select3` ilegible.
+enum CanDriverCmd {
     Start,
     Stop,
     SetBitTiming(gs_usb_protocol::gs_usb_types::GsDeviceBitTiming),
+    Transmit(CanTxRequest),
 }
-static CAN_CTRL_CHANNEL: Channel<CriticalSectionRawMutex, CanCommand, 4> = Channel::new();
+static CAN_CMD_CHANNEL: Channel<CriticalSectionRawMutex, CanDriverCmd, 16> = Channel::new();
 
+/// Petición de transmisión CAN generada por `usb_rx_task`.
 struct CanTxRequest {
     echo_id: u32,
     id: u32,
@@ -37,18 +41,17 @@ struct CanTxRequest {
     data: [u8; 8],
     dlc: u8,
 }
-static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanTxRequest, 16> = Channel::new();
 
 static USB_ECHO_CHANNEL: Channel<CriticalSectionRawMutex, GsHostFrame, 16> = Channel::new();
 
 fn on_start_cb() {
-    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Start);
+    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Start);
 }
 fn on_stop_cb() {
-    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Stop);
+    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Stop);
 }
 fn on_bit_timing_cb(timing: gs_usb_protocol::gs_usb_types::GsDeviceBitTiming) {
-    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::SetBitTiming(timing));
+    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::SetBitTiming(timing));
 }
 
 /// Callback para `GS_USB_BREQ_IDENTIFY`: enciende/apaga el LED de
@@ -125,7 +128,7 @@ async fn main(spawner: Spawner) {
     // 2. Lanzamos la tarea de fondo del USB
     spawner.spawn(usb_task(usb_device).unwrap());
     
-    spawner.spawn(can_rx_task(board.can_driver).unwrap());
+    spawner.spawn(can_driver_task(board.can_driver).unwrap());
     spawner.spawn(usb_tx_task(ep_in).unwrap());
     spawner.spawn(usb_rx_task(ep_out).unwrap());
 
@@ -143,26 +146,55 @@ async fn usb_task(mut usb: UsbDevice<'static, bsp_f446::usb::BspUsbDriver>) -> !
 }
 
 
-// Tarea 1: Productor (Lee del hardware CAN y transmite tramas desde el host)
+/// Tarea actor que es la **única dueña** del driver CAN (`BspCan`).
+///
+/// El bxCAN de Embassy requiere `&mut self` para `read()`, `write()` y
+/// `modify_config()`, por lo que no se puede compartir libremente entre tareas.
+/// Esta tarea centraliza todo el acceso al hardware CAN:
+/// - Recibe comandos (`Start`, `Stop`, `SetBitTiming`, `Transmit`) por `CAN_CMD_CHANNEL`.
+/// - Cuando está iniciada, lee tramas del bus y las mete en `CAN_RX_CHANNEL`.
 #[embassy_executor::task]
-async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
+async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
     let mut is_started = false;
 
     loop {
         if is_started {
-            match select3(CAN_CTRL_CHANNEL.receive(), can.can.read(), CAN_TX_CHANNEL.receive()).await {
-                Either3::First(cmd) => {
+            // Estado RUNNING: esperamos comandos O tramas del bus (select de 2, no 3).
+            match select(CAN_CMD_CHANNEL.receive(), can.can.read()).await {
+                Either::First(cmd) => {
                     match cmd {
-                        CanCommand::Stop => {
+                        CanDriverCmd::Stop => {
                             info!("CAN: Apagando controlador por comando USB...");
                             is_started = false;
                             can.stop();
                         }
-                        CanCommand::Start => info!("CAN: Ya estaba iniciado"),
-                        CanCommand::SetBitTiming(_) => info!("CAN: Debes hacer STOP antes de cambiar la velocidad"),
+                        CanDriverCmd::Start => {
+                            info!("CAN: Ya estaba iniciado");
+                        }
+                        CanDriverCmd::SetBitTiming(_) => {
+                            info!("CAN: Debes hacer STOP antes de cambiar la velocidad");
+                        }
+                        CanDriverCmd::Transmit(tx_req) => {
+                            let data_slice = &tx_req.data[..tx_req.dlc as usize];
+                            match can.transmit(tx_req.id, tx_req.is_extended, tx_req.is_rtr, data_slice).await {
+                                Ok(()) => {
+                                    let echo_frame = GsHostFrame::from_tx_msg_echo(
+                                        tx_req.echo_id,
+                                        tx_req.id,
+                                        tx_req.is_extended,
+                                        tx_req.dlc,
+                                        &tx_req.data,
+                                    );
+                                    let _ = USB_ECHO_CHANNEL.try_send(echo_frame);
+                                }
+                                Err(e) => {
+                                    error!("CAN TX: Error al transmitir: {:?}", defmt::Debug2Format(&e));
+                                }
+                            }
+                        }
                     }
                 }
-                Either3::Second(Ok(env)) => {
+                Either::Second(Ok(env)) => {
                     let rx_frame = env.frame;
                     
                     let id: u32 = match rx_frame.id() {
@@ -179,56 +211,40 @@ async fn can_rx_task(mut can: bsp_f446::can::BspCan) {
                     }
 
                     let generic_frame = can_protocol::CanFrame { id, is_extended, data, dlc: dlc as u8 };
-
-                    let decoded = can_protocol::analyze_frame(&generic_frame);
-                    match decoded {
-                        can_protocol::DecodedProtocol::Obd2Request(cmd) => defmt::info!("OBD2: {:?}", defmt::Debug2Format(&cmd)),
-                        can_protocol::DecodedProtocol::UdsMessage(msg) => defmt::info!("UDS: {:?}", defmt::Debug2Format(&msg)),
-                        can_protocol::DecodedProtocol::Raw => {} 
-                    }
-
                     CAN_RX_CHANNEL.send(generic_frame).await;
                 }
-                Either3::Second(Err(_)) => {}
-                Either3::Third(tx_req) => {
-                    let data_slice = &tx_req.data[..tx_req.dlc as usize];
-                    match can.transmit(tx_req.id, tx_req.is_extended, tx_req.is_rtr, data_slice).await {
-                        Ok(()) => {
-                            let echo_frame = GsHostFrame::from_tx_msg_echo(
-                                tx_req.echo_id,
-                                tx_req.id,
-                                tx_req.is_extended,
-                                tx_req.dlc,
-                                &tx_req.data,
-                            );
-                            let _ = USB_ECHO_CHANNEL.try_send(echo_frame);
-                        }
-                        Err(e) => {
-                            error!("CAN TX: Error al transmitir: {:?}", defmt::Debug2Format(&e));
-                        }
-                    }
-                }
+                Either::Second(Err(_)) => {}
             }
         } else {
-            let cmd = CAN_CTRL_CHANNEL.receive().await;
+            // Estado STOPPED: solo aceptamos comandos (no leemos del bus).
+            let cmd = CAN_CMD_CHANNEL.receive().await;
             match cmd {
-                CanCommand::Start => {
+                CanDriverCmd::Start => {
                     info!("CAN: Iniciando controlador...");
                     is_started = true;
                     can.start();
                 }
-                CanCommand::Stop => info!("CAN: Ya estaba detenido"),
-                CanCommand::SetBitTiming(timing) => {
+                CanDriverCmd::Stop => {
+                    info!("CAN: Ya estaba detenido");
+                }
+                CanDriverCmd::SetBitTiming(timing) => {
                     info!("CAN: Configurando Bit Timing: brp={}, prop={}, phase1={}, phase2={}, sjw={}", 
                         timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw);
                     can.set_bit_timing(&timing);
+                }
+                CanDriverCmd::Transmit(_) => {
+                    warn!("CAN: Ignorando transmisión, controlador detenido");
                 }
             }
         }
     }
 }
 
-// Tarea 2: Consumidor USB TX — Envía tramas CAN al host (RX del bus + echoes de TX)
+/// Tarea de consumidor USB TX — Envía tramas CAN al host (RX del bus + echoes de TX).
+///
+/// También decodifica OBD2/UDS para logging, ya que es el único lugar que consume
+/// `CAN_RX_CHANNEL`. De este modo `can_driver_task` no se ensucia con lógica de
+/// protocolo y se mantiene enfocada en el hardware.
 #[embassy_executor::task]
 async fn usb_tx_task(mut ep_in: bsp_f446::usb::BspUsbEndpointIn) {
     ep_in.wait_enabled().await;
@@ -237,6 +253,17 @@ async fn usb_tx_task(mut ep_in: bsp_f446::usb::BspUsbEndpointIn) {
     loop {
         let host_frame = match select(CAN_RX_CHANNEL.receive(), USB_ECHO_CHANNEL.receive()).await {
             Either::First(frame) => {
+                // Decodificación OBD2/UDS solo para logging (no altera el frame enviado al host).
+                match can_protocol::analyze_frame(&frame) {
+                    can_protocol::DecodedProtocol::Obd2Request(cmd) => {
+                        defmt::info!("OBD2: {:?}", defmt::Debug2Format(&cmd));
+                    }
+                    can_protocol::DecodedProtocol::UdsMessage(msg) => {
+                        defmt::info!("UDS: {:?}", defmt::Debug2Format(&msg));
+                    }
+                    can_protocol::DecodedProtocol::Raw => {}
+                }
+
                 GsHostFrame::from_can_frame(frame.id, frame.is_extended, frame.dlc, &frame.data)
             }
             Either::Second(echo_frame) => echo_frame,
@@ -253,7 +280,7 @@ async fn usb_tx_task(mut ep_in: bsp_f446::usb::BspUsbEndpointIn) {
     }
 }
 
-// Tarea 3: USB RX — Lee tramas del host por Bulk OUT y las envía al bus CAN
+/// Tarea USB RX — Lee tramas del host por Bulk OUT y las encola para transmisión CAN.
 #[embassy_executor::task]
 async fn usb_rx_task(mut ep_out: bsp_f446::usb::BspUsbEndpointOut) {
     ep_out.wait_enabled().await;
@@ -275,10 +302,10 @@ async fn usb_rx_task(mut ep_out: bsp_f446::usb::BspUsbEndpointOut) {
                     dlc,
                 };
 
-                match CAN_TX_CHANNEL.try_send(tx_req) {
+                match CAN_CMD_CHANNEL.try_send(CanDriverCmd::Transmit(tx_req)) {
                     Ok(()) => {}
                     Err(_) => {
-                        warn!("USB RX: Cola CAN TX llena, descartando trama");
+                        warn!("USB RX: Cola CAN CMD llena, descartando trama");
                     }
                 }
             }
