@@ -9,7 +9,7 @@ rustflags = [
 target = "thumbv7em-none-eabihf"
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "info"
 
 [alias]
 # Comandos para testear el workspace nativamente en tu PC.
