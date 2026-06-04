@@ -24,14 +24,16 @@
 ## Canales
 
 ```
-CAN_RX_CHANNEL:     Channel<CanFrame, 32>     CAN RX → USB TX
-CAN_CTRL_CHANNEL:   Channel<CanCommand, 4>    USB Control → CAN config
+CAN_RX_CHANNEL:     Channel<CanFrame, 32>         CAN RX → USB TX
+CAN_CMD_CHANNEL:    Channel<CanDriverCmd, 16>      USB Control / TX → CAN driver
+USB_ECHO_CHANNEL:   Channel<GsHostFrame, 16>      TX echo → USB TX
 ```
 
-`CanCommand` es un enum:
+`CanDriverCmd` es un enum que unifica control y transmisión:
 - `Start` — Habilita el controlador CAN
 - `Stop` — Lo pone en modo silencio
 - `SetBitTiming(GsDeviceBitTiming)` — Configura la velocidad
+- `Transmit(CanTxRequest)` — Solicitud de transmisión desde el host
 
 ## Por qué este diseño
 
@@ -43,3 +45,4 @@ CAN_CTRL_CHANNEL:   Channel<CanCommand, 4>    USB Control → CAN config
 | Separar gs_usb_protocol del BSP | Permite testear el handler de control transfers en host sin hardware |
 | Buffer de 32 en CAN_RX_CHANNEL | Absorbe ráfagas típicas de diagnóstico (flash, lectura masiva de PIDs) |
 | Endpoint IN de 64 bytes | Máximo para USB Full Speed, un GsHostFrame cabe exacto (20 bytes) |
+| Canal único `CAN_CMD_CHANNEL` | Simplifica el actor del driver CAN: un solo `select` de 2 fuentes en lugar de `select3` |

@@ -57,19 +57,20 @@ ngin-link-rust-fw/
 
 ## Flujo de Datos (Arquitectura Actual)
 ```
-Bus CAN físico → bxCAN HW → Embassy CAN Driver → can_rx_task (Productor)
+Bus CAN físico → bxCAN HW → Embassy CAN Driver → can_driver_task (Actor único del hardware)
                                                        ↓
                                                CAN_RX_CHANNEL (Channel<CanFrame, 32>)
                                                        ↓
-                                               usb_tx_task (Consumidor) → [TODO: USB EP IN]
+                                               usb_tx_task (Consumidor + Decodificación OBD2/UDS) → USB EP IN
 ```
 
-**Control (Host → Device):**
+**Control y TX (Host → Device → Bus CAN):**
 ```
 Host USB → gs_usb control transfer → GsUsbControlHandler
-  ├── GS_USB_BREQ_BITTIMING → on_bit_timing_cb → CAN_CTRL_CHANNEL → can_rx_task
-  ├── GS_USB_BREQ_MODE (START) → on_start_cb → CAN_CTRL_CHANNEL → can_rx_task
-  └── GS_USB_BREQ_MODE (STOP) → on_stop_cb → CAN_CTRL_CHANNEL → can_rx_task
+  ├── GS_USB_BREQ_BITTIMING → on_bit_timing_cb → CAN_CMD_CHANNEL → can_driver_task
+  ├── GS_USB_BREQ_MODE (START) → on_start_cb → CAN_CMD_CHANNEL → can_driver_task
+  ├── GS_USB_BREQ_MODE (STOP) → on_stop_cb → CAN_CMD_CHANNEL → can_driver_task
+  └── Bulk OUT (GsTxMsg) → usb_rx_task → CAN_CMD_CHANNEL → can_driver_task → bxCAN HW
 ```
 
 ## Estado Actual (WIP)
@@ -78,11 +79,11 @@ Host USB → gs_usb control transfer → GsUsbControlHandler
 - BSP-F446: init con PLL (84MHz sys, 48MHz USB), drivers USB y CAN
 - gs_usb protocol: handler de control transfers, tipos C-repr, config USB
 - can-protocol: CanFrame, decodificador OBD2 y UDS (sniffer básico)
-- Tarea can_rx_task: recibe tramas CAN, las decodifica, envía por canal
-- Tarea usb_tx_task: envía GsHostFrame por Bulk IN (RX del bus + echoes de TX)
-- Tarea usb_rx_task: lee GsTxMsg por Bulk OUT y los enruta a CAN_TX_CHANNEL
-- Bucle de transmisión CAN (can_rx_task con `select3` para RX / CTRL / TX)
-- Canal de control USB→CAN para start/stop/bit_timing
+- Tarea can_driver_task: actor único del hardware CAN (RX del bus + TX + control)
+- Tarea usb_tx_task: envía GsHostFrame por Bulk IN (RX del bus + echoes de TX) + decodifica OBD2/UDS
+- Tarea usb_rx_task: lee GsTxMsg por Bulk OUT y los enruta a CAN_CMD_CHANNEL como CanDriverCmd::Transmit
+- Bucle del driver CAN (can_driver_task con `select` de 2 fuentes: CAN_CMD_CHANNEL + can.read())
+- Canal unificado CAN_CMD_CHANNEL para control + TX (Start/Stop/SetBitTiming/Transmit)
 - Comandos gs_usb soportados: TIMESTAMP, IDENTIFY, GET/SET_USER_ID, DEV_CAPABILITIES
 - 57 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host)
 
@@ -135,5 +136,6 @@ DEFMT_LOG=trace cargo run --release
 4. Al modificar gs_usb_types.rs, asegurar que los structs sean `#[repr(C)]` y `Pod`
 5. Los tests de gs_usb_protocol y can_protocol corren en host, no en el MCU
 6. El BSP encapsula TODO lo relacionado al hardware específico del STM32F446
-7. El flujo principal está en main.rs: can_rx_task → Canal → usb_tx_task
+7. El flujo principal está en main.rs: can_driver_task → CAN_RX_CHANNEL → usb_tx_task
 8. Para agregar nuevas capacidades USB, modificar GsUsbControlHandler
+9. `can_driver_task` es el actor único del hardware CAN; no se puede separar RX/TX/CTRL en tareas diferentes porque `embassy_stm32::can::Can` requiere `&mut self`

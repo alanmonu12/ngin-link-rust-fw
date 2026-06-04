@@ -30,14 +30,14 @@ Implementación completa del envío y recepción de tramas CAN vía USB Bulk end
 │         │                                     │                    │
 │         │                                     ▼                    │
 │         │                            ┌──────────────┐             │
-│         │                            │ CAN_TX_CHAN  │             │
+│         │                            │ CAN_CMD_CHAN │             │
 │         │                            │    (16)      │             │
 │         │                            └──────┬──────┘             │
 │         │                                   │                     │
 │         │                                   ▼                     │
 │         │                          ┌────────────────┐            │
-│         │                          │  can_rx_task   │            │
-│         │                          │  (select3)     │            │
+│         │                          │ can_driver_task│            │
+│         │                          │   (select 2)   │            │
 │         │                          └───────┬────────┘            │
 │         │                                  │                      │
 │         │                                  ▼                      │
@@ -114,7 +114,7 @@ async fn usb_rx_task(mut ep_out: BspUsbEndpointOut) {
         match ep_out.read(&mut buf).await {
             Ok(n) if n >= 20 => {
                 let tx_msg: GsTxMsg = bytemuck::pod_read_unaligned(&buf[..20]);
-                // Convertir a CanTxRequest y enviar a CAN_TX_CHANNEL
+                // Convertir a CanTxRequest y enviar CanDriverCmd::Transmit
             }
             Ok(n) => warn!("Trama incompleta"),
             Err(e) => error!("Error USB RX"),
@@ -128,29 +128,36 @@ async fn usb_rx_task(mut ep_out: BspUsbEndpointOut) {
 2. **Canal sin bloqueo:** `try_send()` evita bloqueo si la cola está llena
 3. **Lectura directa:** Lee solo 20 bytes (tamaño de GsTxMsg) del buffer de 64
 
-### 5. can_rx_task (con TX integrado)
+### 5. can_driver_task (actor único del hardware CAN)
 
 ```rust
-async fn can_rx_task(mut can: BspCan) {
+async fn can_driver_task(mut can: BspCan) {
     loop {
         if is_started {
-            match select3(
-                CAN_CTRL_CHANNEL.receive(),  // Comandos USB
-                can.can.read(),              // Tramas RX del bus
-                CAN_TX_CHANNEL.receive()     // Solicitudes TX del host
+            match select(
+                CAN_CMD_CHANNEL.receive(),   // Comandos + TX
+                can.can.read()               // RX del bus
             ).await {
-                Either3::First(cmd) => { /* Control */ }
-                Either3::Second(Ok(env)) => { /* RX → CAN_RX_CHANNEL */ }
-                Either3::Third(tx_req) => {
-                    // TX → can.transmit() → USB_ECHO_CHANNEL
-                }
+                Either::First(cmd) => { /* Control + TX */ }
+                Either::Second(Ok(env)) => { /* RX → CAN_RX_CHANNEL */ }
+                Either::Second(Err(_)) => { /* Ignorar error */ }
             }
+        } else {
+            // Solo acepta comandos (no lee del bus)
+            let cmd = CAN_CMD_CHANNEL.receive().await;
+            // Manejar Start, Stop, SetBitTiming
         }
     }
 }
 ```
 
-### 6. usb_tx_task (multiplexor TX)
+**Características:**
+- Es la **única tarea** con acceso `&mut` al driver CAN
+- Unifica control y TX en un solo canal (`CAN_CMD_CHANNEL`)
+- Cuando está detenido, solo acepta comandos (no lee del bus)
+- Cuando está iniciado, hace `select` entre 2 fuentes (no 3)
+
+### 6. usb_tx_task (multiplexor TX + decodificación)
 
 ```rust
 async fn usb_tx_task(mut ep_in: BspUsbEndpointIn) {
@@ -159,13 +166,22 @@ async fn usb_tx_task(mut ep_in: BspUsbEndpointIn) {
             CAN_RX_CHANNEL.receive(),    // Tramas del bus
             USB_ECHO_CHANNEL.receive()   // Echoes de TX
         ).await {
-            Either::First(frame) => GsHostFrame::from_can_frame(...),
+            Either::First(frame) => {
+                // Decodificar OBD2/UDS solo para logging
+                match can_protocol::analyze_frame(&frame) { ... }
+                GsHostFrame::from_can_frame(...)
+            }
             Either::Second(echo) => echo,
         };
         ep_in.write(bytemuck::bytes_of(&host_frame)).await;
     }
 }
 ```
+
+**Características:**
+- Consume `CAN_RX_CHANNEL` y `USB_ECHO_CHANNEL`
+- Decodifica OBD2/UDS para logging (no afecta el frame enviado)
+- Serializa con `bytemuck::bytes_of()` (zero-copy)
 
 ## Flujo de Datos
 
@@ -176,8 +192,8 @@ async fn usb_tx_task(mut ep_in: BspUsbEndpointIn) {
 2. usb_rx_task lee del EP OUT
 3. Parsea con bytemuck::pod_read_unaligned()
 4. Convierte a CanTxRequest
-5. Envía a CAN_TX_CHANNEL via try_send()
-6. can_rx_task recibe de CAN_TX_CHANNEL
+5. Envía CanDriverCmd::Transmit(tx_req) a CAN_CMD_CHANNEL via try_send()
+6. can_driver_task recibe el comando
 7. Llama a can.transmit()
 8. can.write() al hardware bxCAN
 9. Envía echo a USB_ECHO_CHANNEL
@@ -189,11 +205,11 @@ async fn usb_tx_task(mut ep_in: BspUsbEndpointIn) {
 ```
 1. bxCAN recibe trama del bus
 2. can.can.read() retorna Envelope
-3. can_rx_task extrae id, data, dlc
+3. can_driver_task extrae id, data, dlc
 4. Convierte a can_protocol::CanFrame
-5. Decodifica (OBD2/UDS/RAW)
-6. Envía a CAN_RX_CHANNEL
-7. usb_tx_task recibe de CAN_RX_CHANNEL
+5. Envía a CAN_RX_CHANNEL
+6. usb_tx_task recibe de CAN_RX_CHANNEL
+7. Decodifica OBD2/UDS para logging
 8. Convierte a GsHostFrame
 9. Escribe por Bulk IN (20 bytes)
 10. Host recibe trama en SocketCAN
@@ -204,13 +220,12 @@ async fn usb_tx_task(mut ep_in: BspUsbEndpointIn) {
 | Canal | Tipo | Capacidad | Uso |
 |-------|------|-----------|-----|
 | `CAN_RX_CHANNEL` | `CanFrame` | 32 | Tramas RX del bus → USB |
-| `CAN_TX_CHANNEL` | `CanTxRequest` | 16 | Solicitudes TX del host → CAN |
+| `CAN_CMD_CHANNEL` | `CanDriverCmd` | 16 | Comandos control + TX → driver CAN |
 | `USB_ECHO_CHANNEL` | `GsHostFrame` | 16 | Echoes de TX → USB |
-| `CAN_CTRL_CHANNEL` | `CanCommand` | 4 | Comandos start/stop/timing |
 
 **Consideraciones de RAM:**
 - Cada `CanFrame` ocupa ~20 bytes
-- Total para canales: ~1,5 KB (32×20 + 16×24 + 16×20 + 4×~12)
+- Total para canales: ~1,4 KB (32×20 + 16×28 + 16×20)
 - Ajustable según necesidades de buffering
 
 ## Tests Unitarios
@@ -242,7 +257,7 @@ cargo test test_from_tx_msg_echo --target aarch64-apple-darwin
 2. **Un solo canal:** `channel` siempre es 0
 3. **Sin timestamps:** El campo `flags` podría usarse para timestamps
 4. **Sin filtros:** Se reciben todas las tramas del bus
-5. **Echo inmediato:** Se envía antes de confirmar TX al硬件
+5. **Echo inmediato:** Se envía antes de confirmar TX al hardware
 
 ## Próximos Pasos
 

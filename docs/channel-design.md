@@ -30,7 +30,7 @@ El firmware usa `embassy_sync::channel` para comunicación asíncrona entre tare
 static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 32> = Channel::new();
 ```
 
-**Productor:** `can_rx_task` (cuando recibe del bus)
+**Productor:** `can_driver_task` (cuando recibe del bus)
 **Consumidor:** `usb_tx_task`
 
 **Por qué 32 mensajes:**
@@ -39,21 +39,24 @@ static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 32> = Channel:
 - 32 mensajes dan ~1ms de buffer en ráfaga máxima
 - RAM: 32 × 20 bytes = 640 bytes
 
-### 2. CAN_TX_CHANNEL (16 mensajes)
+### 2. CAN_CMD_CHANNEL (16 mensajes)
 
-**Propósito:** Solicitudes de transmisión desde host USB → CAN
+**Propósito:** Comandos de control y solicitudes de transmisión → actor del driver CAN
 
 ```rust
-static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanTxRequest, 16> = Channel::new();
+static CAN_CMD_CHANNEL: Channel<CriticalSectionRawMutex, CanDriverCmd, 16> = Channel::new();
 ```
 
-**Productor:** `usb_rx_task`
-**Consumidor:** `can_rx_task`
+**Productores:**
+- Callbacks de `GsUsbControlHandler` (`Start`, `Stop`, `SetBitTiming`)
+- `usb_rx_task` (`Transmit`)
+
+**Consumidor:** `can_driver_task`
 
 **Por qué 16 mensajes:**
-- El host generalmente envía tramas una por una
-- 16 es suficiente para burst cortos
-- RAM: 16 × ~24 bytes = 384 bytes
+- Unifica control (esporádico) y TX (burst posible del host)
+- Evita tener dos canales separados que complican el `select`
+- RAM: 16 × ~28 bytes = ~448 bytes
 
 ### 3. USB_ECHO_CHANNEL (16 mensajes)
 
@@ -63,95 +66,92 @@ static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanTxRequest, 16> = Chan
 static USB_ECHO_CHANNEL: Channel<CriticalSectionRawMutex, GsHostFrame, 16> = Channel::new();
 ```
 
-**Productor:** `can_rx_task` (después de transmitir)
+**Productor:** `can_driver_task` (después de transmitir exitosamente)
 **Consumidor:** `usb_tx_task`
 
 **Por qué 16 mensajes:**
-- Debe coincidir con CAN_TX_CHANNEL
+- Debe coincidir con la capacidad de TX
 - Cada TX genera un echo
 - RAM: 16 × 20 bytes = 320 bytes
 
-### 4. CAN_CTRL_CHANNEL (4 mensajes)
-
-**Propósito:** Comandos de configuración start/stop/timing
-
-```rust
-static CAN_CTRL_CHANNEL: Channel<CriticalSectionRawMutex, CanCommand, 4> = Channel::new();
-```
-
-**Productor:** Callbacks de `GsUsbControlHandler`
-**Consumidor:** `can_rx_task`
-
-**Por qué 4 mensajes:**
-- Comandos esporádicos (start, stop, configuración)
-- No hay ráfagas de comandos
-- RAM: 4 × ~12 bytes = 48 bytes
-
-## Patrón: select3() en can_rx_task
+## Patrón: select() en can_driver_task
 
 ### Problema
 
-`can_rx_task` debe escuchar 3 fuentes simultáneamente:
-1. Comandos de configuración (CAN_CTRL_CHANNEL)
-2. Tramas del bus CAN (can.read())
-3. Solicitudes de transmisión (CAN_TX_CHANNEL)
+`can_driver_task` es el **actor único** del driver CAN. Debe escuchar 2 fuentes simultáneamente cuando está iniciado:
+1. Comandos del driver (`CAN_CMD_CHANNEL`: control + transmisión)
+2. Tramas del bus CAN (`can.can.read()`)
 
 ### Solución
 
 ```rust
-match select3(
-    CAN_CTRL_CHANNEL.receive(),  // Fuente 1
-    can.can.read(),              // Fuente 2
-    CAN_TX_CHANNEL.receive()     // Fuente 3
+match select(
+    CAN_CMD_CHANNEL.receive(),   // Fuente 1: comandos + TX
+    can.can.read()               // Fuente 2: RX del bus
 ).await {
-    Either3::First(cmd) => { /* Manejar comando */ }
-    Either3::Second(result) => { /* Manejar RX del bus */ }
-    Either3::Third(tx_req) => { /* Manejar TX */ }
+    Either::First(cmd) => { /* Manejar comando */ }
+    Either::Second(Ok(env)) => { /* Manejar RX del bus */ }
+    Either::Second(Err(_)) => { /* Ignorar error de bus */ }
 }
 ```
 
-### Cómo funciona select3()
+### Cómo funciona select()
 
 <div align="center">
-  <img src="../imgs/select3().png" alt="select3()" />
-  <p><em>select3() consulta 3 fuentes simultáneas de forma cooperativa y fair.</em></p>
+  <img src="../imgs/select3().png" alt="select()" />
+  <p><em>select() consulta 2 fuentes simultáneas de forma cooperativa y fair.</em></p>
 </div>
-┌─────────────────────────────────────────────────────┐
-│                    select3()                        │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
-│  │ receive()│  │  read()  │  │ receive()│        │
-│  │  ctrl    │  │   can    │  │   tx     │        │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘        │
-│       │              │              │              │
-│       ▼              ▼              ▼              │
-│  ┌─────────────────────────────────────────────┐  │
-│  │          Waker Registry                     │  │
-│  │  - Registra wakers de cada operación        │  │
-│  └─────────────────────────────────────────────┘  │
-│                      │                            │
-│                      ▼                            │
-│  ┌─────────────────────────────────────────────┐  │
-│  │          Poll (cooperative)                 │  │
-│  │  - Solo una fuente retorna valor            │  │
-│  │  - Las otras se re-registran para futuro    │  │
-│  └─────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+
+```
+┌─────────────────────────────────────────────┐
+│                    select()                 │
+├─────────────────────────────────────────────┤
+│                                             │
+│  ┌──────────────┐  ┌──────────────┐        │
+│  │  receive()   │  │   read()     │        │
+│  │  CAN_CMD     │  │   can        │        │
+│  └──────┬───────┘  └──────┬───────┘        │
+│         │                 │                 │
+│         ▼                 ▼                 │
+│  ┌──────────────────────────────────────┐  │
+│  │          Waker Registry              │  │
+│  │  - Registra wakers de cada op      │  │
+│  └──────────────────────────────────────┘  │
+│                    │                        │
+│                    ▼                        │
+│  ┌──────────────────────────────────────┐  │
+│  │          Poll (cooperative)          │  │
+│  │  - Solo una fuente retorna valor     │  │
+│  │  - Las otras se re-registran         │  │
+│  └──────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
 ```
 
 **Características:**
 - No desperdicia CPU (polling no activo)
-- Fair: todas las fuentes se consultan equitativamente
+- Fair: ambas fuentes se consultan equitativamente
 - Sin prioridad explícita (depende del orden de registro)
+
+### Por qué solo 2 fuentes (no 3)
+
+Anteriormente se usaba `select3()` con:
+- `CAN_CTRL_CHANNEL` (control)
+- `can.can.read()` (RX)
+- `CAN_TX_CHANNEL` (TX)
+
+Esto se simplificó a un único canal `CAN_CMD_CHANNEL` que unifica control y TX:
+- **Menor complejidad:** Un solo `select` en lugar de `select3`
+- **Código más legible:** No hay `Either3::First/Second/Third`
+- **Menor overhead:** ~100 ciclos en Cortex-M4 vs ~150 con `select3`
+- **Responsabilidad clara:** `can_driver_task` solo recibe "comandos" y las ejecuta
 
 ## Patrón: select() en usb_tx_task
 
 ### Problema
 
 `usb_tx_task` debe enviar 2 tipos de tramas:
-1. Tramas recibidas del bus (CAN_RX_CHANNEL)
-2. Echoes de transmisión (USB_ECHO_CHANNEL)
+1. Tramas recibidas del bus (`CAN_RX_CHANNEL`)
+2. Echoes de transmisión (`USB_ECHO_CHANNEL`)
 
 ### Solución
 
@@ -171,7 +171,7 @@ let host_frame = match select(
 
 ```rust
 fn on_start_cb() {
-    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Start);
+    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Start);
 }
 ```
 
@@ -180,13 +180,13 @@ fn on_start_cb() {
 ### 2. try_send() en usb_rx_task
 
 ```rust
-match CAN_TX_CHANNEL.try_send(tx_req) {
+match CAN_CMD_CHANNEL.try_send(CanDriverCmd::Transmit(tx_req)) {
     Ok(()) => {}
-    Err(_) => warn!("Cola CAN TX llena"),
+    Err(_) => warn!("Cola CAN CMD llena"),
 }
 ```
 
-**Razón:** Si el CAN no puede absorber tramas tan rápido como el USB las recibe, la cola se llena. Es mejor descartar que bloquear el USB.
+**Razón:** Si el driver CAN no puede absorber tramas tan rápido como el USB las recibe, la cola se llena. Es mejor descartar que bloquear el USB.
 
 ### 3. Result en transmit()
 
@@ -204,7 +204,7 @@ match can.transmit(...).await {
 ### 1. Zero-Copy con bytemuck
 
 ```rust
-// ❌ Copybyte-by-byte (lento)
+// ❌ Copy byte-by-byte (lento)
 let mut msg = GsTxMsg::default();
 msg.echo_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
 // ...
@@ -220,9 +220,8 @@ let msg: GsTxMsg = bytemuck::pod_read_unaligned(&buf);
 | Canal | Capacidad | Justificación |
 |-------|-----------|---------------|
 | CAN_RX | 32 | Absorbe burst de CAN a 1Mbps |
-| CAN_TX | 16 | Host generalmente envía 1 a 1 |
-| ECHO | 16 | 1:1 con CAN_TX |
-| CTRL | 4 | Comandos esporádicos |
+| CAN_CMD | 16 | Unifica control + TX burst |
+| ECHO | 16 | 1:1 con TX |
 
 ### 3. Límite de DLC
 
@@ -234,25 +233,27 @@ pub fn dlc(&self) -> u8 {
 
 **Prev:** Envío de datos inválidos al hardware
 
-### 4. select3() en lugar de múltiples select()
+### 4. select() en lugar de select3()
 
 ```rust
-// ❌select anidado (más overhead)
-match select(ctrl, select(can_read, tx)).await { ... }
-
-// ✅ select3() (más eficiente)
+// ❌ select3() (más complejo, menos legible)
 match select3(ctrl, can_read, tx).await { ... }
+
+// ✅ select() de 2 fuentes (más simple)
+match select(CAN_CMD_CHANNEL.receive(), can.can.read()).await { ... }
 ```
+
+**Beneficio:** Menor complejidad cognitiva, menos ramas en el `match`, ~50 ciclos menos por iteración.
 
 ## Consideraciones de Timing
 
 ### Latencia del sistema
 
 ```
-USB RX → usb_rx_task → CAN_TX_CHANNEL → can_rx_task → bxCAN
-  │                                                  │
-  └─ ~1ms (USB Full Speed)                          └─ ~30μs (CAN 500kbps)
-                                                      
+USB RX → usb_rx_task → CAN_CMD_CHANNEL → can_driver_task → bxCAN
+  │                                                     │
+  └─ ~1ms (USB Full Speed)                              └─ ~30μs (CAN 500kbps)
+
 Total: ~1.03ms por trama
 ```
 
@@ -260,11 +261,11 @@ Total: ~1.03ms por trama
 
 - CAN 500kbps: ~4,500 tramas/segundo (tramas de 8 bytes)
 - USB Full Speed: ~1,000 transferencias/segundo × 64 bytes
-- Botleneck: USB (no CAN)
+- Bottleneck: USB (no CAN)
 
 ### Jitter
 
-- `select3()`: ~1μs de jitter por iteración
+- `select()`: ~1μs de jitter por iteración
 - `try_send()`: ~0.1μs (no bloquea)
 - `ep_out.read()`: Variable (depende de USB stack)
 
@@ -274,13 +275,13 @@ Total: ~1.03ms por trama
 
 ```rust
 info!("CAN: Configurando Bit Timing");
-warn!("USB RX: Cola CAN TX llena");
+warn!("USB RX: Cola CAN CMD llena");
 error!("CAN TX: Error al transmitir");
 ```
 
 ### Métricas a monitorear
 
-1. **Tasa de descartes en CAN_TX_CHANNEL:** Indica si el CAN es bottleneck
+1. **Tasa de descartes en CAN_CMD_CHANNEL:** Indica si el driver CAN es bottleneck
 2. **Tasa de errores USB TX:** Indica si el host está leyendo
 3. **Latencia end-to-end:** Medir con timestamps
 

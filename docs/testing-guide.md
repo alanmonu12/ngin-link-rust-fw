@@ -560,7 +560,7 @@ DEFMT_LOG=info cargo test --target aarch64-apple-darwin
 
 3. **Canal capacity tests:**
    - Test de try_send cuando la cola está llena
-   - Test de select3 con múltiples fuentes listas
+   - Test de select con múltiples fuentes listas
 
 ### Prioridad Media
 

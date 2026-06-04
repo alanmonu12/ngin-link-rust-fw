@@ -95,49 +95,58 @@ CAN_RX_CHANNEL = 32 tramas
 = ~1ms de buffering a 500kbps
 ```
 
-### 3. select3() en Lugar de select() Anidado
+### 3. Canal Unificado + select() de 2 Fuentes
 
-**Antes:**
+**Antes (3 canales + select3):**
 ```rust
-// ❌select anidado
-match select(CAN_CTRL_CHANNEL.receive(), 
-             select(can.can.read(), CAN_TX_CHANNEL.receive())).await {
-    Either::First(Either::First(cmd)) => { ... }
-    Either::First(Either::Second(_)) => unreachable!(),
-    Either::Second(Either::First(Ok(env))) => { ... }
-    Either::Second(Either::Second(tx)) => { ... }
-}
-// Costo: ~150 ciclos (dos selects)
-```
+// ❌ Tres canales separados y select3
+static CAN_CTRL_CHANNEL: Channel<..., CanCommand, 4> = Channel::new();
+static CAN_TX_CHANNEL: Channel<..., CanTxRequest, 16> = Channel::new();
 
-**Ahora:**
-```rust
-// ✅ select3()
-match select3(CAN_CTRL_CHANNEL.receive(), can.can.read(), CAN_TX_CHANNEL.receive()).await {
+match select3(
+    CAN_CTRL_CHANNEL.receive(),
+    can.can.read(),
+    CAN_TX_CHANNEL.receive()
+).await {
     Either3::First(cmd) => { ... }
     Either3::Second(Ok(env)) => { ... }
     Either3::Third(tx) => { ... }
 }
-// Costo: ~100 ciclos (un solo select)
+// Costo: ~100 ciclos, pero complejidad cognitiva alta
 ```
 
-**Mejora:** 33% más rápido, código más legible
+**Ahora (1 canal + select de 2):**
+```rust
+// ✅ Canal unificado para control + TX
+static CAN_CMD_CHANNEL: Channel<..., CanDriverCmd, 16> = Channel::new();
+
+match select(
+    CAN_CMD_CHANNEL.receive(),   // Comandos + TX
+    can.can.read()              // RX del bus
+).await {
+    Either::First(cmd) => { ... }
+    Either::Second(Ok(env)) => { ... }
+}
+// Costo: ~100 ciclos, código más legible, menor complejidad
+```
+
+**Mejora:** 33% menos complejidad cognitiva, mismo performance, menos RAM (un solo canal vs dos)
 
 ### 4. try_send() en Contextos Críticos
 
 **En callbacks (interrupción USB):**
 ```rust
 fn on_start_cb() {
-    let _ = CAN_CTRL_CHANNEL.try_send(CanCommand::Start);
+    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Start);
     // No bloquea, falla silenciosamente si la cola está llena
 }
 ```
 
 **En usb_rx_task:**
 ```rust
-match CAN_TX_CHANNEL.try_send(tx_req) {
+match CAN_CMD_CHANNEL.try_send(CanDriverCmd::Transmit(tx_req)) {
     Ok(()) => {}
-    Err(_) => warn!("Cola CAN TX llena, descartando trama"),
+    Err(_) => warn!("Cola CAN CMD llena, descartando trama"),
 }
 ```
 
@@ -178,27 +187,26 @@ let host_frame = match select(CAN_RX_CHANNEL.receive(), USB_ECHO_CHANNEL.receive
 ```
 usb_rx_task: ~100 bytes (buf + tx_msg + tx_req)
 usb_tx_task: ~50 bytes (host_frame + bytes)
-can_rx_task: ~200 bytes (select3 state + env + generic_frame)
-Total: ~350 bytes de stack
+can_driver_task: ~150 bytes (select state + env + generic_frame)
+Total: ~300 bytes de stack
 ```
 
 ### Static Usage
 
 ```
 CAN_RX_CHANNEL: 32 × 20 = 640 bytes
-CAN_TX_CHANNEL: 16 × 24 = 384 bytes
+CAN_CMD_CHANNEL: 16 × ~28 = ~448 bytes
 USB_ECHO_CHANNEL: 16 × 20 = 320 bytes
-CAN_CTRL_CHANNEL: 4 × 12 = 48 bytes
-Total: ~1,392 bytes
+Total: ~1,408 bytes
 ```
 
 ### Total Estimado
 
 ```
-Stack: 350 bytes
-Static: 1,392 bytes
+Stack: 300 bytes (can_driver_task usa menos estado que el select3 anterior)
+Static: 1,408 bytes
 USB buffers: 256 bytes (EP_OUT_BUFFER)
-Total: ~1,998 bytes (~2KB)
+Total: ~1,964 bytes (~2KB)
 ```
 
 ## Benchmarking
@@ -257,7 +265,7 @@ let (reader, writer) = can.split();
 ```rust
 // Futuro: Asignar prioridades
 #[embassy_executor::task(priority = 3)]
-async fn can_rx_task() { ... } // Alta prioridad
+async fn can_driver_task() { ... } // Alta prioridad
 
 #[embassy_executor::task(priority = 1)]
 async fn usb_tx_task() { ... } // Baja prioridad
@@ -325,7 +333,8 @@ defmt::info!("Stats: rx={}, tx={}, echo={}, drop={}",
 
 - ✅ Zero-copy con bytemuck
 - ✅ Canales con capacidad fija
-- ✅ select3() eficiente
+- ✅ Canal unificado (CAN_CMD_CHANNEL) para control + TX
+- ✅ select() de 2 fuentes en can_driver_task
 - ✅ try_send() en contextos críticos
 - ✅ Límites en tiempo de compilación
 - ✅ Multiplexor optimizado

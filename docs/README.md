@@ -64,10 +64,10 @@ El bitfield de features coincide con `include/uapi/linux/can/gs_usb.h` y un test
 1. **GsTxMsg** - Struct para mensajes host→device
 2. **GsHostFrame::from_tx_msg_echo()** - Creación de echoes
 3. **BspCan::transmit()** - Transmisión CAN async
-4. **CAN_TX_CHANNEL** - Canal para solicitudes TX
+4. **CAN_CMD_CHANNEL** - Canal unificado para comandos control + TX
 5. **USB_ECHO_CHANNEL** - Canal para echoes
-6. **can_rx_task** - Modificado con select3()
-7. **usb_tx_task** - Modificado con select()
+6. **can_driver_task** - Actor único del hardware CAN (select de 2 fuentes)
+7. **usb_tx_task** - Multiplexor + decodificación OBD2/UDS
 8. **usb_rx_task** - Implementado completamente
 9. **GsIdentifyMode / GsDeviceCapabilities** - Tipos para IDENTIFY y DEV_CAPABILITIES
 

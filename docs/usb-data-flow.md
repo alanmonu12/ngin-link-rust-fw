@@ -19,19 +19,20 @@ Es el flujo principal del firmware. Cada trama que llega al bus CAN debe llegar 
 
 2. **`can.can.read()` convierte a formato genérico.** Embassy provee un driver async que lee del FIFO y devuelve un `Envelope` con los campos `id`, `data` y `dlc`. Esto abstrae los registros del hardware.
 
-3. **`can_rx_task` decodifica inline.** Antes de enviar al canal, la tarea intenta identificar el protocolo: ¿es OBD2? ¿es UDS? ¿es una trama raw? Si es diagnóstico, loguea el resultado con `defmt` para debugging en tiempo real.
+3. **`can_driver_task` extrae y encola.** La tarea actor lee la trama del bus, la convierte a `can_protocol::CanFrame`, y la mete en `CAN_RX_CHANNEL`. **No decodifica OBD2/UDS aquí** — eso se hace en `usb_tx_task` para mantener el driver CAN enfocado en el hardware.
 
-4. **`CAN_RX_CHANNEL` absorbe ráfagas.** Es un buffer circular de 32 slots. Si el host no está leyendo (USB lento), la trama se queda en el buffer en lugar de perderse. Si el buffer se llena, `can_rx_task` se bloquea hasta que `usb_tx_task` libere un slot.
+4. **`CAN_RX_CHANNEL` absorbe ráfagas.** Es un buffer circular de 32 slots. Si el host no está leyendo (USB lento), la trama se queda en el buffer en lugar de perderse. Si el buffer se llena, `can_driver_task` se bloquea hasta que `usb_tx_task` libere un slot.
 
-5. **`usb_tx_task` serializa con zero-copy.** Convierte `CanFrame` a `GsHostFrame` (ambos 20 bytes, `#[repr(C)]`) y usa `bytemuck::bytes_of()` para reinterpretar la memoria como bytes. No hay copia — solo un puntero reinterpretado.
+5. **`usb_tx_task` decodifica y serializa.** Consume `CAN_RX_CHANNEL`, decodifica OBD2/UDS para logging, y convierte `CanFrame` a `GsHostFrame` (ambos 20 bytes, `#[repr(C)]`). Usa `bytemuck::bytes_of()` para reinterpretar la memoria como bytes. No hay copia — solo un puntero reinterpretado.
 
 6. **USB Bulk IN envía al host.** Escribe 20 bytes al endpoint IN. El host los recibe como una trama SocketCAN estándar.
 
 ### Por qué importa el diseño
 
 - **Sin `alloc`:** No hay malloc/free. Los canales tienen tamaño fijo en tiempo de compilación.
-- **Lock-free:** `embassy_sync::channel` usa interrupciones atómicas, no mutexes. `can_rx_task` puede correr en contexto de interrupción si fuera necesario.
+- **Lock-free:** `embassy_sync::channel` usa interrupciones atómicas, no mutexes. `can_driver_task` puede correr en contexto de interrupción si fuera necesario.
 - **Zero-copy:** La serialización con `bytemuck` evita copiar byte por byte. En un Cortex-M4 a 84MHz, esto ahorra ~50 ciclos por trama.
+- **Separación de responsabilidades:** `can_driver_task` hace hardware; `usb_tx_task` hace protocolo y USB.
 
 ---
 
@@ -48,11 +49,11 @@ El host configura el device usando **control transfers** USB (vendor requests). 
 
 Cuando el usuario ejecuta `sudo ip link set can0 up`, el driver gs_usb realiza esta secuencia:
 
-1. **`GS_USB_BREQ_BT_CONST`** — Pregunta al device: ¿qué frecuencia de reloj soportas? El firmware responde con `GsDeviceBtConst` (40 bytes) que incluye `fclk_can = 48MHz` y los límites de `tseg1`, `tseg2`, `sjw` y `brp`.
+1. **`GS_USB_BREQ_BT_CONST`** — Pregunta al device: ¿qué frecuencia de reloj soportas? El firmware responde con `GsDeviceBtConst` (40 bytes) que incluye `fclk_can = 42MHz` y los límites de `tseg1`, `tseg2`, `sjw` y `brp`.
 
-2. **`GS_USB_BREQ_BITTIMING`** — El driver calcula el bit timing óptimo para 500kbps y envía `GsDeviceBitTiming` al firmware. El callback `on_bit_timing_cb` lo enruta por `CAN_CTRL_CHANNEL` hasta `can_rx_task`, que configura el hardware CAN.
+2. **`GS_USB_BREQ_BITTIMING`** — El driver calcula el bit timing óptimo para 500kbps y envía `GsDeviceBitTiming` al firmware. El callback `on_bit_timing_cb` lo enruta por `CAN_CMD_CHANNEL` hasta `can_driver_task`, que configura el hardware CAN.
 
-3. **`GS_USB_BREQ_MODE` (START=1)** — Activa el controlador CAN. El callback `on_start_cb` envía `CanCommand::Start` por el canal de control. `can_rx_task` llama a `can.start()` y comienza a escuchar el bus.
+3. **`GS_USB_BREQ_MODE` (START=1)** — Activa el controlador CAN. El callback `on_start_cb` envía `CanDriverCmd::Start` por el canal de comandos. `can_driver_task` llama a `can.start()` y comienza a escuchar el bus.
 
 4. **`GS_USB_BREQ_MODE` (STOP=0)`** — Detiene el CAN. Útil para reconfigurar o apagar.
 
@@ -76,13 +77,13 @@ Los callbacks de USB corren en **contexto de interrupción**. No pueden hacer `a
 
 ---
 
-## Máquina de estados: can_rx_task
+## Máquina de estados: can_driver_task
 
-`can_rx_task` es la tarea más compleja del firmware. Debe manejar tres fuentes de datos simultáneamente usando `select3()`.
+`can_driver_task` es la tarea más compleja del firmware. Es el **actor único** del driver CAN: centraliza todo el acceso al hardware bxCAN.
 
 <div align="center">
-  <img src="../imgs/Estados-de-can_rx_task.png" alt="Estados de can_rx_task" />
-  <p><em>Máquina de estados de can_rx_task: transiciones entre modo DETENIDO e INICIADO.</em></p>
+  <img src="../imgs/Estados-de-can_rx_task.png" alt="Estados de can_driver_task" />
+  <p><em>Máquina de estados de can_driver_task: transiciones entre modo DETENIDO e INICIADO.</em></p>
 </div>
 
 ### Estados
@@ -90,17 +91,18 @@ Los callbacks de USB corren en **contexto de interrupción**. No pueden hacer `a
 | Estado | Descripción |
 |--------|-------------|
 | **DETENIDO** | CAN apagado. No escucha el bus. Solo procesa comandos de configuración. |
-| **INICIADO** | CAN activo. Escucha 3 fuentes: comandos de control, tramas del bus, y solicitudes TX del host. |
+| **INICIADO** | CAN activo. Escucha 2 fuentes: comandos del driver y tramas del bus. |
 
 ### Transiciones
 
-- **DETENIDO → INICIADO:** Cuando llega `CanCommand::Start` (ya sea por `on_start_cb` o directamente del canal).
-- **INICIADO → DETENIDO:** Cuando llega `CanCommand::Stop`.
-- **INICIADO → INICIADO:** `CanCommand::Start` se ignora (ya está activo). `SetBitTiming` requiere STOP primero (el hardware no permite cambiar velocidad en caliente).
+- **DETENIDO → INICIADO:** Cuando llega `CanDriverCmd::Start` (ya sea por `on_start_cb` o directamente del canal).
+- **INICIADO → DETENIDO:** Cuando llega `CanDriverCmd::Stop`.
+- **INICIADO → INICIADO:** `CanDriverCmd::Start` se ignora (ya está activo). `SetBitTiming` requiere STOP primero (el hardware no permite cambiar velocidad en caliente).
+- **Cualquier estado:** `CanDriverCmd::Transmit` se ignora en DETENIDO y se ejecuta en INICIADO.
 
-### El problema de select3()
+### El problema de múltiples fuentes
 
-`can_rx_task` debe escuchar 3 fuentes sin prioridad fija:
+`can_driver_task` debe escuchar varias fuentes sin prioridad fija. Anteriormente se usaba `select3()` con:
 
 ```
 select3(
@@ -110,11 +112,20 @@ select3(
 )
 ```
 
-Si solo usara `select()` anidado, tendría dos problemas:
-- **Menor eficiencia:** Dos selects en cascada = ~150 ciclos vs ~100 con select3.
-- **Código ilegible:** Los `Either::First(Either::Second(...))` son confusos.
+Esto se simplificó a un **único canal de comandos** (`CAN_CMD_CHANNEL`) y un `select` de 2 fuentes:
 
-`select3()` resuelve ambos: un solo punto de decisión, más rápido y más claro.
+```rust
+select(
+    CAN_CMD_CHANNEL.receive(),   // Comandos + TX
+    can.can.read()              // RX del bus
+)
+```
+
+**Beneficios de la simplificación:**
+- **Menor complejidad:** Un `select` de 2 fuentes vs `select3` de 3
+- **Código más legible:** No hay `Either3::First/Second/Third`
+- **Menor overhead:** ~100 ciclos vs ~150 con `select3` en Cortex-M4
+- **Responsabilidad clara:** Todos los eventos que llegan al driver CAN son "comandos"
 
 ### Flujo de una trama RX típica
 
@@ -122,11 +133,11 @@ Si solo usara `select()` anidado, tendría dos problemas:
 1. can.can.read() retorna Ok(Envelope)
 2. Se extrae id, data, dlc del envelope
 3. Se crea CanFrame con esos campos
-4. Se decodifica: OBD2, UDS, o Raw
-5. Se envía a CAN_RX_CHANNEL.try_send()
-6. Si la cola está llena → se bloquea (espera)
-7. usb_tx_task consume la trama
-8. Se serializa con bytemuck
+4. Se envía a CAN_RX_CHANNEL.send().await
+5. Si la cola está llena → se bloquea (espera)
+6. usb_tx_task consume la trama
+7. Decodifica OBD2/UDS para logging
+8. Convierte a GsHostFrame con bytemuck
 9. Se escribe al EP IN (20 bytes)
 10. Host recibe la trama en SocketCAN
 ```
@@ -136,11 +147,12 @@ Si solo usara `select()` anidado, tendría dos problemas:
 ```
 1. Host envía GsTxMsg (20 bytes) por EP OUT
 2. usb_rx_task lee y parsea con bytemuck
-3. Se envía a CAN_TX_CHANNEL.try_send()
-4. can_rx_task recibe la solicitud
-5. Llama a can.transmit() al hardware
-6. Si el ID es inválido → log error, se continúa
-7. Si es exitoso → envía echo a USB_ECHO_CHANNEL
-8. usb_tx_task envía el echo al host
-9. Host confirma que la trama fue enviada
+3. Convierte a CanTxRequest
+4. Envía CanDriverCmd::Transmit(tx_req) a CAN_CMD_CHANNEL via try_send()
+5. can_driver_task recibe el comando
+6. Llama a can.transmit() al hardware
+7. Si el ID es inválido → log error, se continúa
+8. Si es exitoso → envía echo a USB_ECHO_CHANNEL
+9. usb_tx_task envía el echo al host
+10. Host confirma que la trama fue enviada
 ```

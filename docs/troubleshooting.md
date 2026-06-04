@@ -189,7 +189,7 @@ candump can0  # Debería ver la trama
 1. Verificar que el firmware está en modo START
 2. Usar loopback para pruebas
 3. Verificar logs de USB RX: `USB RX: Recibidos X bytes`
-4. Verificar que `CAN_TX_CHANNEL` no está lleno
+4. Verificar que `CAN_CMD_CHANNEL` no está lleno
 
 ### 7. Echo de TX no funciona
 
@@ -214,7 +214,7 @@ DEFMT_LOG=trace cargo run --release
 
 **Soluciones:**
 1. Verificar que `usb_tx_task` usa `select()` con ambos canales
-2. Verificar que `can_rx_task` envía a `USB_ECHO_CHANNEL` después de TX
+2. Verificar que `can_driver_task` envía a `USB_ECHO_CHANNEL` después de TX exitoso
 3. Verificar que `echo_id` se preserva del `GsTxMsg`
 
 ### 8. Drop de mensajes bajo alta carga
@@ -372,7 +372,7 @@ static mut DROP_COUNT: u32 = 0;
 // En usb_rx_task:
 unsafe { RX_COUNT += 1; }
 
-// En can_rx_task:
+// En can_driver_task (después de transmitir exitosamente):
 unsafe { TX_COUNT += 1; }
 
 // En usb_rx_task (cuando falla try_send):
@@ -400,7 +400,7 @@ defmt::info!("Stats: RX={}, TX={}, DROP={}",
 ```
 1. Verificar USB RX: logs de "USB RX: Recibidos X bytes"
 2. Verificar CAN TX: logs de "CAN TX: Error"
-3. Verificar CAN_TX_CHANNEL: logs de "Cola CAN TX llena"
+3. Verificar CAN_CMD_CHANNEL: logs de "Cola CAN CMD llena"
 4. Verificar CAN transmite: candump en otro dispositivo
 ```
 
