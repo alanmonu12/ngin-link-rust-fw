@@ -1,12 +1,20 @@
 use defmt::*;
 use embassy_futures::select::{select, Either};
-use gs_usb_protocol::gs_usb_types::{GsHostFrame, CanBusError};
-use crate::channels::{CAN_CMD_CHANNEL, CAN_RX_CHANNEL, USB_ECHO_CHANNEL, CanDriverCmd};
+use embassy_time::{Duration, Timer};
+use gs_usb_protocol::gs_usb_types::{GsHostFrame, CanBusError, CanControllerError};
+use crate::app_context::{CAN_CMD_CHANNEL, CAN_RX_CHANNEL, USB_ECHO_CHANNEL, CAN_SERVICE, CanDriverCmd};
+
+const BUS_OFF_DELAYS_MS: &[u64] = &[100, 200, 400, 800, 1600, 3200];
+const MAX_BUS_OFF_RETRIES: u8 = 5;
 
 #[embassy_executor::task]
 pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
     let mut is_started = false;
     let mut can_error_count: u32 = 0;
+    let mut overflow_pending = false;
+
+    crate::app_context::CAN_READY.signal(());
+    info!("CAN: Tarea lista (esperando comando START del host)");
 
     loop {
         if is_started {
@@ -16,6 +24,7 @@ pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                         CanDriverCmd::Stop => {
                             info!("CAN: Apagando controlador");
                             is_started = false;
+                            CAN_SERVICE.mark_stopped();
                             can.stop().await;
                         }
                         CanDriverCmd::Start { loopback, listen_only, one_shot } => {
@@ -29,11 +38,10 @@ pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                             can.reenable().await;
                         }
                         CanDriverCmd::Transmit(tx_req) => {
-                            info!("CAN TX: Enviando id=0x{:03X} ext={} dlc={}", tx_req.id, tx_req.is_extended, tx_req.dlc);
+                            trace!("CAN TX: Enviando id=0x{:03X} ext={} dlc={}", tx_req.id, tx_req.is_extended, tx_req.dlc);
                             let data_slice = &tx_req.data[..tx_req.dlc as usize];
                             match can.transmit(tx_req.id, tx_req.is_extended, tx_req.is_rtr, data_slice).await {
                                 Ok(()) => {
-                                    info!("CAN TX: Enviado OK");
                                     let echo_frame = GsHostFrame::from_tx_msg_echo(
                                         tx_req.echo_id,
                                         tx_req.id,
@@ -41,7 +49,9 @@ pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                                         tx_req.dlc,
                                         &tx_req.data,
                                     );
-                                    let _ = USB_ECHO_CHANNEL.try_send(echo_frame);
+                                    if USB_ECHO_CHANNEL.try_send(echo_frame).is_err() {
+                                        CAN_SERVICE.dropped_rx.fetch_add(1, portable_atomic::Ordering::Relaxed);
+                                    }
                                 }
                                 Err(bsp_f446::can::CanTxError::Timeout) => {
                                     warn!("CAN TX: Timeout — sin ACK del bus, mailboxes abortados");
@@ -69,13 +79,17 @@ pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                         data[..dlc].copy_from_slice(payload);
                     }
 
-                    info!("CAN RX: id=0x{:03X} ext={} dlc={} data={=[u8]:#X}", id, is_extended, dlc, &data[..dlc.min(8)]);
+                    trace!("CAN RX: id=0x{:03X} ext={} dlc={}", id, is_extended, dlc);
 
                     let generic_frame = can_protocol::CanFrame { id, is_extended, data, dlc: dlc as u8 };
-                    CAN_RX_CHANNEL.send(generic_frame).await;
+                    if CAN_RX_CHANNEL.try_send(generic_frame).is_err() {
+                        CAN_SERVICE.dropped_rx.fetch_add(1, portable_atomic::Ordering::Relaxed);
+                        overflow_pending = true;
+                    }
                 }
                 Either::Second(Err(e)) => {
                     can_error_count += 1;
+                    CAN_SERVICE.error_count.store(can_error_count, portable_atomic::Ordering::Relaxed);
                     let err_frame = match &e {
                         embassy_stm32::can::enums::BusError::Stuff => {
                             warn!("CAN RX error #{}, tipo: Stuff", can_error_count);
@@ -106,13 +120,37 @@ pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                             GsHostFrame::from_bus_error(CanBusError::Software)
                         }
                     };
-                    let _ = USB_ECHO_CHANNEL.try_send(err_frame);
+
                     if can.can.is_sleeping() {
-                        info!("CAN: Recuperando de bus-off...");
-                        can.can.enable().await;
-                        can_error_count = 0;
+                        let retry_count = CAN_SERVICE.bus_off_count.fetch_add(1, portable_atomic::Ordering::Relaxed);
+                        let retry_idx = (retry_count as usize).min(BUS_OFF_DELAYS_MS.len() - 1);
+
+                        if retry_count < MAX_BUS_OFF_RETRIES as u32 {
+                            info!("CAN: Bus-off detectado, reintento #{} con delay de {}ms...", retry_count + 1, BUS_OFF_DELAYS_MS[retry_idx]);
+                            can.can.enable().await;
+                            Timer::after(Duration::from_millis(BUS_OFF_DELAYS_MS[retry_idx])).await;
+                            can_error_count = 0;
+                            overflow_pending = false;
+                        } else {
+                            error!("CAN: Bus-off agotó {} reintentos, notificando al host", MAX_BUS_OFF_RETRIES);
+                            let bus_off_frame = GsHostFrame::from_controller_error(CanControllerError::BusOff);
+                            let _ = USB_ECHO_CHANNEL.try_send(bus_off_frame);
+                        }
+                    } else {
+                        if USB_ECHO_CHANNEL.try_send(err_frame).is_err() {
+                            CAN_SERVICE.dropped_rx.fetch_add(1, portable_atomic::Ordering::Relaxed);
+                            overflow_pending = true;
+                        }
                     }
                 }
+            }
+
+            if overflow_pending {
+                if CAN_RX_CHANNEL.try_receive().is_ok() {
+                    // Frame descartado por overflow; el flag se usará
+                    // cuando se implemente GS_CAN_FLAG_OVERFLOW por frame.
+                }
+                overflow_pending = false;
             }
         } else {
             let cmd = CAN_CMD_CHANNEL.receive().await;
@@ -120,6 +158,7 @@ pub async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                 CanDriverCmd::Start { loopback, listen_only, one_shot } => {
                     info!("CAN: Iniciando controlador (loopback={}, listen_only={}, one_shot={})...", loopback, listen_only, one_shot);
                     is_started = true;
+                    CAN_SERVICE.mark_started();
                     can.start(loopback, listen_only, one_shot).await;
                 }
                 CanDriverCmd::Stop => {
