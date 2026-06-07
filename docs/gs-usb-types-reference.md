@@ -81,13 +81,17 @@ pub struct GsDeviceConfig {
     pub reserved1: u8,
     pub reserved2: u8,
     pub reserved3: u8,
-    pub interface_count: u8,  // Número de interfaces CAN
-    pub sw_version: u32,      // Versión del software
+    pub interface_count: u8,  // ⚠️ icount=0 → 1 interfaz CAN (kernel hace icount+1)
+    pub sw_version: u32,      // ⚠️ sw_version > 1 requerido para GS_CAN_FEATURE_IDENTIFY
     pub hw_version: u32,      // Versión del hardware
 }
 ```
 
 **Tamaño:** 12 bytes
+
+**⚠️ Bugs conocidos del kernel:**
+- `interface_count=0` → kernel crea 1 interfaz CAN (can0). `interface_count=1` → kernel crea 2 interfaces (can0 y can1).
+- `sw_version` debe ser >1 para que el kernel habilite `GS_CAN_FEATURE_IDENTIFY`.
 
 **Uso:**
 - El driver Linux solicita esta información al inicio
@@ -167,8 +171,9 @@ pub struct GsHostFrame {
 **Campos detallados:**
 
 #### echo_id
-- **0:** Trama recibida del bus CAN
-- **>0:** Echo de transmisión (el mismo ID que envió el host)
+- **0xFFFFFFFF** (`GS_HOST_FRAME_ECHO_ID_RX`): Trama recibida del bus CAN
+- **>0 y <0xFFFFFFFF:** Echo de transmisión (el mismo ID que envió el host)
+- **⚠️ NUNCA usar 0**: El kernel descarta `echo_id=0` como "Unexpected unused echo id 0"
 - Permite al driver correlacionar TX con confirmaciones
 
 #### can_id
@@ -344,8 +349,8 @@ cansend can0 123#DEADBEEF
 ### Formato de tramas
 
 El driver Linux espera exactamente 20 bytes por trama:
-- RX: GsHostFrame con echo_id = 0
-- TX: GsTxMsg con echo_id > 0
+- RX: GsHostFrame con echo_id = 0xFFFFFFFF (`GS_HOST_FRAME_ECHO_ID_RX`)
+- TX: GsTxMsg con echo_id > 0 (el host asigna un ID secuencial)
 - Echo: GsHostFrame con echo_id > 0 y flags = GS_USB_FLAG_TX_ECHO
 
 ## Tests

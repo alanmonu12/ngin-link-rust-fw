@@ -139,14 +139,24 @@ $ candump can0
 2. Bus CAN sin tráfico
 3. Firmware no está en modo START
 4. Error en USB TX
+5. **BUG COMÚN: `echo_id` incorrecto** — si los frames RX usan `echo_id=0`, el kernel los descarta como "Unexpected unused echo id 0". Los frames RX deben usar `GS_HOST_FRAME_ECHO_ID_RX = 0xFFFFFFFF`.
+6. **BUG COMÚN: `interface_count` incorrecto** — si `icount=1` en `GsDeviceConfig`, el kernel crea 2 interfaces (can0 y can1). Usar `icount=0` para 1 interfaz.
+7. **BUG COMÚN: `bt_const_feature` inconsistente** — si `GsDeviceBtConst.feature` no coincide con `GsDeviceCapabilities.feature`, modos como listen-only no se habilitan en SocketCAN.
 
 **Diagnóstico:**
 ```bash
 # Verificar que CAN está activo
 ip link show can0
 
+# Verificar que el driver gs_usb bindió correctamente
+dmesg | grep gs_usb
+# Debe decir "Configuring for 1 interfaces" (NO "2 interfaces")
+
 # Verificar tráfico en el bus (si hay otro dispositivo)
 cangen can0 -g 100 -I 42A -L 8 -D 1122334455667788 -p 100
+
+# Verificar que no hay errores de eco
+dmesg | grep "Unexpected unused echo"
 
 # Verificar logs del firmware
 DEFMT_LOG=info cargo run --release
@@ -156,6 +166,9 @@ DEFMT_LOG=info cargo run --release
 1. Activar interface: `sudo ip link set can0 up`
 2. Verificar conexión física CAN_H/CAN_L
 3. Verificar que el firmware recibe START: logs con `CAN: Iniciando controlador...`
+4. Verificar `echo_id = 0xFFFFFFFF` en `GsHostFrame::from_can_frame()`
+5. Verificar `interface_count = 0` en `GsDeviceConfig`
+6. Verificar `bt_const.feature == capabilities.feature`
 
 ### 6. No se pueden enviar tramas (cansend falla)
 

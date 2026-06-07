@@ -86,7 +86,7 @@ Las posiciones de bit **deben coincidir exactamente** con `include/uapi/linux/ca
 ### Callbacks del Handler
 ```rust
 GsUsbControlHandler {
-    on_start: Option<fn()>,
+    on_start: Option<fn(u32)>,        // flags de modo (LISTEN_ONLY, LOOP_BACK, etc.)
     on_stop: Option<fn()>,
     on_bit_timing: Option<fn(GsDeviceBitTiming)>,
     on_identify: Option<fn(bool)>,  // true = LED ON
@@ -95,7 +95,21 @@ GsUsbControlHandler {
     capabilities: GsDeviceCapabilities, // bitfield de features reportadas
 }
 ```
-Los callbacks envían comandos por `CAN_CTRL_CHANNEL` — **nunca llaman directamente al hardware CAN**. El callback `on_identify` y la fuente `now_ms` son `fn` puros (no `FnMut`/`FnOnce`) porque el handler no tiene `&mut` a estado async: el firmware debe delegar a un `Channel` Embassy si necesita notificar a una tarea.
+Los callbacks envían comandos por `CAN_CMD_CHANNEL` — **nunca llaman directamente al hardware CAN**. El callback `on_identify` y la fuente `now_ms` son `fn` puros (no `FnMut`/`FnOnce`) porque el handler no tiene `&mut` a estado async: el firmware debe delegar a un `Channel` Embassy si necesita notificar a una tarea.
+
+## ⚠️ Lecciones Críticas de Interoperabilidad gs_usb
+
+### echo_id en frames RX
+El driver gs_usb del kernel usa `echo_id == 0xFFFFFFFF` (`GS_HOST_FRAME_ECHO_ID_RX`) para distinguir frames recibidos del bus de ecos de transmisión. **NUNCA** usar `echo_id = 0` para frames RX — el kernel lo descarta como "Unexpected unused echo id 0".
+
+### interface_count en GsDeviceConfig
+El kernel hace `icount = dconf.icount + 1`. Para **1 interfaz CAN**, usar `icount = 0`. Usar `icount = 1` crea incorrectamente 2 interfaces (can0 y can1).
+
+### sw_version y GS_CAN_FEATURE_IDENTIFY
+El kernel solo habilita `GS_CAN_FEATURE_IDENTIFY` si `sw_version > 1`. Usar `sw_version = 1` desactiva IDENTIFY aunque el feature esté en capabilities.
+
+### bt_const_feature debe reflejar capabilities
+`GsDeviceBtConst.feature` debe ser idéntico a `GsDeviceCapabilities.feature`. El kernel consulta BT_CONST para determinar capacidades como listen-only.
 
 ## Protocolos Automotrices (Decodificación)
 

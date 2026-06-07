@@ -58,19 +58,17 @@ ngin-link-rust-fw/
 ## Flujo de Datos (Arquitectura Actual)
 ```
 Bus CAN físico → bxCAN HW → Embassy CAN Driver → can_driver_task (Actor único del hardware)
-                                                       ↓
-                                               CAN_RX_CHANNEL (Channel<CanFrame, 32>)
-                                                       ↓
-                                               usb_tx_task (Consumidor + Decodificación OBD2/UDS) → USB EP IN
-```
+                                                       ├─ RX OK → CAN_RX_CHANNEL → usb_tx_task → USB EP IN (al host)
+                                                       └─ Error → USB_ECHO_CHANNEL → usb_tx_task → USB EP IN (error frame al host)
 
-**Control y TX (Host → Device → Bus CAN):**
-```
+Control y TX (Host → Device → Bus CAN):
 Host USB → gs_usb control transfer → GsUsbControlHandler
   ├── GS_USB_BREQ_BITTIMING → on_bit_timing_cb → CAN_CMD_CHANNEL → can_driver_task
-  ├── GS_USB_BREQ_MODE (START) → on_start_cb → CAN_CMD_CHANNEL → can_driver_task
+  ├── GS_USB_BREQ_MODE (START) → on_start_cb(flags) → CAN_CMD_CHANNEL → can_driver_task
   ├── GS_USB_BREQ_MODE (STOP) → on_stop_cb → CAN_CMD_CHANNEL → can_driver_task
-  └── Bulk OUT (GsTxMsg) → usb_rx_task → CAN_CMD_CHANNEL → can_driver_task → bxCAN HW
+  └── Bulk OUT (GsTxMsg) → usb_rx_task → CAN_CMD_CHANNEL → can_driver_task
+                                                                    ├─ TX OK → USB_ECHO_CHANNEL → usb_tx_task → host
+                                                                    └─ TX Timeout → log + descarta
 ```
 
 ## Estado Actual (WIP)
@@ -85,12 +83,18 @@ Host USB → gs_usb control transfer → GsUsbControlHandler
 - Bucle del driver CAN (can_driver_task con `select` de 2 fuentes: CAN_CMD_CHANNEL + can.read())
 - Canal unificado CAN_CMD_CHANNEL para control + TX (Start/Stop/SetBitTiming/Transmit)
 - Comandos gs_usb soportados: TIMESTAMP, IDENTIFY, GET/SET_USER_ID, DEV_CAPABILITIES
-- 57 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host)
+- Error frames SocketCAN: mapeo de errores bxCAN → GsHostFrame con from_bus_error/from_controller_error
+- Modos CAN dinámicos: listen-only, loopback, one-shot pasados desde host USB
+- Filtros CAN: accept_all configurado en start() (bxCAN sin filtros rechaza todo)
+- Recuperación automática de bus-off en can_driver_task
+- TX con timeout (100ms) y abort de mailboxes
+- Interoperabilidad verificada con driver gs_usb del kernel Linux (candump funciona)
+- 68 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host)
 
 ### Pendiente / TODO
 - **CAN FD:** No soportado aún
 - **Timestamps en GsHostFrame:** El timestamp se expone por control transfer, no embebido en cada frame
-- **Filtros CAN:** No hay configuración de filtros de aceptación
+- **Filtros CAN:** No hay configuración de filtros de aceptación (siempre accept_all)
 - **ISO-TP multi-frame:** Solo se decodifican Single Frames
 - **OBD2 response parsing:** Solo requests
 - **UDS sub-function/DID:** Parsing parcial
@@ -139,3 +143,37 @@ DEFMT_LOG=trace cargo run --release
 7. El flujo principal está en main.rs: can_driver_task → CAN_RX_CHANNEL → usb_tx_task
 8. Para agregar nuevas capacidades USB, modificar GsUsbControlHandler
 9. `can_driver_task` es el actor único del hardware CAN; no se puede separar RX/TX/CTRL en tareas diferentes porque `embassy_stm32::can::Can` requiere `&mut self`
+
+## Lecciones Aprendidas de Interoperabilidad con gs_usb
+
+### Bug: interface_count y el driver del kernel
+El struct `GsDeviceConfig` tiene un campo `icount` (1 byte) que indica la cantidad de interfaces CAN.
+El driver `gs_usb` del kernel Linux hace `icount = dconf.icount + 1`, por lo que:
+- `icount = 0` → 1 interfaz CAN (can0) ✅
+- `icount = 1` → 2 interfaces CAN (can0, can1) ❌
+
+Referencia: `drivers/net/can/usb/gs_usb.c` función `gs_usb_probe()`.
+
+### Bug: echo_id para frames RX
+El driver gs_usb del kernel usa `echo_id == GS_HOST_FRAME_ECHO_ID_RX` (0xFFFFFFFF) para distinguir
+frames recibidos del bus de ecos de transmisión. Si se envía `echo_id = 0`, el kernel lo interpreta
+como un eco de TX pendiente y lo descarta con "Unexpected unused echo id 0".
+Referencia: `gs_usb_receive_bulk_callback()` en `gs_usb.c`.
+
+### Bug: bt_const_feature debe reflejar capabilities
+`GsDeviceBtConst.feature` debe coincidir con `GsDeviceCapabilities.feature`. El kernel consulta
+`GS_USB_BREQ_BT_CONST` para determinar las capacidades del dispositivo. Si faltan features,
+el modo listen-only no se habilita correctamente en SocketCAN.
+
+### Bug: sw_version e IDENTIFY
+El kernel solo habilita `GS_CAN_FEATURE_IDENTIFY` si `sw_version > 1`. Usar `sw_version = 1`
+causa que el feature se deshabilite a pesar de estar en capabilities.
+
+### Compatibilidad gs_usb: Struct layout
+Todos los structs que se intercambian con el host deben ser `#[repr(C)]` y `Pod` (bytemuck).
+El kernel usa `__packed` en los structs equivalentes. Verificar que los tamaños coincidan:
+- `GsDeviceConfig`: 12 bytes
+- `GsDeviceBtConst`: 40 bytes
+- `GsHostFrame`: 20 bytes (header sin timestamp)
+- `GsTxMsg`: 20 bytes
+- `GsDeviceMode`: 8 bytes

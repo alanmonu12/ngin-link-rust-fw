@@ -106,12 +106,14 @@ fn validate_tx_msg(msg: &GsTxMsg) -> bool {
 El CAN tiene **dos estados**: STOPPED y STARTED. Las reglas son:
 
 ```
-STOPPED → STARTED: comando GS_USB_BREQ_MODE(1) = Start
+STOPPED → STARTED: comando GS_USB_BREQ_MODE(1) = Start (con flags: listen_only, loopback, one_shot)
 STARTED → STOPPED: comando GS_USB_BREQ_MODE(0) = Stop
-STOPPED → STOPPED: SetBitTiming (solo se puede configurar en STOPPED)
+STARTED → STARTED: Re-envío de START con flags diferentes (cambia modo dinámicamente)
 ```
 
-**Regla:** Bit timing **solo** se puede cambiar cuando el CAN está en STOP. Si se recibe SetBitTiming en STARTED, se debe loggear y rechazar.
+**Regla:** Bit timing se puede reconfigurar en caliente con `set_bit_timing()` + `reenable()`. El CAN queda en sleep después de `modify_config()`, hay que llamar `enable().await`.
+
+**⚠️ Importante:** Sin filtros de aceptación (accept_all), el bxCAN rechaza TODAS las tramas. Siempre configurar filtros en `start()`.
 
 **Implementar como máquina de estados explícita:**
 ```rust
