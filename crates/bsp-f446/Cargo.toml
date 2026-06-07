@@ -5,12 +5,9 @@ edition = "2021"
 
 [dependencies]
 defmt.workspace = true
-embassy-stm32.workspace = true
+embassy-stm32 = { workspace = true, features = ["defmt"] }
 embassy-usb.workspace = true
 embassy-executor.workspace = true
 embassy-time.workspace = true
 static_cell = "2.0"
 gs-usb-protocol = { path = "../gs-usb-protocol" }
-
-[features]
-defmt = []
