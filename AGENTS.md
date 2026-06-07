@@ -21,21 +21,23 @@ ngin-link-rust-fw/
 │   ├── Cargo.toml
 │   ├── build.rs           # Linker flags (--nmagic)
 │   └── src/
-│       ├── main.rs        # Entry point: init + spawn (orquestación pura)
-│       ├── channels.rs    # CanDriverCmd, CanTxRequest, channels, callbacks USB
+│       ├── main.rs        # Entry point: pipeline de 6 fases, sin lógica de negocio
+│       ├── app_context.rs # Estado central: channels, señales, CanService, callbacks
 │       ├── usb_setup.rs   # build_usb_stack(), StaticCells, tipos USB (genérico sobre Driver)
 │       └── tasks/
 │           ├── mod.rs      # Re-exports públicos
-│           ├── can.rs      # can_driver_task (actor único del hardware CAN)
-│           ├── usb_run.rs  # usb_run (corre UsbDevice)
+│           ├── can.rs      # can_driver_task (actor único CAN, bus-off recovery, métricas)
+│           ├── usb_run.rs  # usb_run (corre UsbDevice, señala USB_DEVICE_READY)
 │           ├── usb_tx.rs   # usb_tx_task (CAN→host + decodificación OBD2/UDS)
-│           └── usb_rx.rs   # usb_rx_task (host→CAN)
+│           ├── usb_rx.rs   # usb_rx_task (host→CAN)
+│           └── health.rs   # health_monitor (IWDG + métricas CAN cada 30s)
 ├── crates/
 │   ├── bsp-f446/          # Board Support Package para STM32F446
 │   │   └── src/
-│   │       ├── lib.rs     # init() -> Board, config RCC/PLL (84MHz/48MHz USB)
+│   │       ├── lib.rs     # init() -> Result<Board, ()>, ResetReason, config RCC/PLL
 │   │       ├── usb.rs     # Driver USB OTG FS, bind_interrupts, type alias
-│   │       └── can.rs     # Driver bxCAN, start/stop/set_bit_timing
+│   │       ├── can.rs     # Driver bxCAN, start/stop/set_bit_timing
+│   │       └── watchdog.rs # BspWatchdog (IWDG wrapper: new/unleash/pet)
 │   ├── gs-usb-protocol/   # Protocolo gs_usb (independiente de hardware)
 │   │   └── src/
 │   │       ├── lib.rs     # Config USB default (VID/PID), no_std con cfg_attr
@@ -62,6 +64,7 @@ ngin-link-rust-fw/
 - `embassy-time` 0.5.1
 - `cortex-m-rt` 0.7, `cortex-m` 0.7.7
 - `defmt` 0.3, `bytemuck` 1.16.0
+- `portable-atomic` 1.0 (feature: `unsafe-assume-single-core` para Cortex-M)
 
 ## Flujo de Datos (Arquitectura Actual)
 ```
@@ -79,26 +82,44 @@ Host USB → gs_usb control transfer → GsUsbControlHandler
                                                                     └─ TX Timeout → log + descarta
 ```
 
+## Pipeline de Inicio (main.rs)
+```
+Fase 1: Hardware     → BSP init (Result<Board, ()>), en fallo → sys_reset
+Fase 2: Stack USB    → build_usb_stack(), configuración gs_usb
+Fase 3: Watchdog     → BspWatchdog::new(iwdg, 5000ms)
+Fase 4: Spawn tareas → usb_run, can_driver, usb_tx, usb_rx, health_monitor
+Fase 5: Confirmación → Espera USB_DEVICE_READY, USB_TX_READY, USB_RX_READY, CAN_READY (5s timeout cada una)
+Fase 6: Loop         → Idle 60s (watchdog lo alimenta health_monitor)
+```
+
 ## Estado Actual (WIP)
 ### Completado
 - Workspace con 4 crates, arquitectura Clean/Clean-ish
 - BSP-F446: init con PLL (84MHz sys, 48MHz USB), drivers USB y CAN
+- BSP-F446: init() retorna Result<Board, ()>, lee ResetReason de RCC_CSR
+- BSP-F446: módulo watchdog (BspWatchdog wrapper sobre IWDG)
 - gs_usb protocol: handler de control transfers, tipos C-repr, config USB
 - can-protocol: CanFrame, decodificador OBD2 y UDS (sniffer básico)
 - Tarea can_driver_task: actor único del hardware CAN (RX del bus + TX + control)
 - Tarea usb_tx_task: envía GsHostFrame por Bulk IN (RX del bus + echoes de TX) + decodifica OBD2/UDS
 - Tarea usb_rx_task: lee GsTxMsg por Bulk OUT y los enruta a CAN_CMD_CHANNEL como CanDriverCmd::Transmit
+- Tarea health_monitor: alimenta IWDG cada 1s, logea métricas CAN cada 30s
 - Bucle del driver CAN (can_driver_task con `select` de 2 fuentes: CAN_CMD_CHANNEL + can.read())
 - Canal unificado CAN_CMD_CHANNEL para control + TX (Start/Stop/SetBitTiming/Transmit)
 - Comandos gs_usb soportados: TIMESTAMP, IDENTIFY, GET/SET_USER_ID, DEV_CAPABILITIES
 - Error frames SocketCAN: mapeo de errores bxCAN → GsHostFrame con from_bus_error/from_controller_error
 - Modos CAN dinámicos: listen-only, loopback, one-shot pasados desde host USB
 - Filtros CAN: accept_all configurado en start() (bxCAN sin filtros rechaza todo)
-- Recuperación automática de bus-off en can_driver_task
+- Recuperación automática de bus-off con backoff exponencial (100-3200ms, max 5 reintentos)
+- Bus-off agotado envía CanControllerError::BusOff al host
 - TX con timeout (100ms) y abort de mailboxes
 - Interoperabilidad verificada con driver gs_usb del kernel Linux (candump funciona)
+- CanService: métricas atómicas (error_count, dropped_rx, bus_off_count), mark_started/mark_stopped
+- Señales de inicio: CAN_READY, USB_TX_READY, USB_RX_READY, USB_DEVICE_READY con timeout 5s
+- try_send en can_driver_task (no bloquea si canal lleno), cuenta dropped_rx
+- Logs rutinarios en trace!, solo eventos de altoValor en info/warn/error
 - 68 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host con `cargo test-linux`)
-- Estructura modular de firmware: main.rs (orquestación), channels.rs (estado compartido), usb_setup.rs (stack USB), tasks/ (cada tarea en su archivo)
+- Estructura modular: main.rs (pipeline 6 fases), app_context.rs (estado central), usb_setup.rs, tasks/
 
 ### Pendiente / TODO
 - **CAN FD:** No soportado aún
@@ -108,7 +129,6 @@ Host USB → gs_usb control transfer → GsUsbControlHandler
 - **OBD2 response parsing:** Solo requests
 - **UDS sub-function/DID:** Parsing parcial
 - **LEDs/Indicadores:** Callback `on_identify` existe pero el GPIO no está cableado
-- **Watchdog:** No implementado
 - **Persistencia de user_id:** Solo vive en RAM; no se guarda en flash
 
 ## Convenciones del Proyecto
@@ -152,8 +172,14 @@ DEFMT_LOG=trace cargo run --release
 7. El flujo principal está en tasks/: can_driver_task → CAN_RX_CHANNEL → usb_tx_task
 8. Para agregar nuevas capacidades USB, modificar GsUsbControlHandler
 9. `can_driver_task` es el actor único del hardware CAN; no se puede separar RX/TX/CTRL en tareas diferentes porque `embassy_stm32::can::Can` requiere `&mut self`
-10. `channels.rs` concentra todo el estado compartido (channels, tipos, callbacks); `usb_setup.rs` construye el stack USB de forma genérica sobre `Driver<'static>`
+10. `app_context.rs` concentra todo el estado compartido (channels, señales, CanService, callbacks); `usb_setup.rs` construye el stack USB de forma genérica sobre `Driver<'static>`
 11. `gs-usb-protocol` usa `cfg(feature = "defmt")` para logs, no `cfg(test)`. Correr tests con `cargo test-linux` (sin feature defmt)
+12. `portable-atomic` feature es `unsafe-assume-single-core` (no `unsafe-assume-single-thread`)
+13. `gs_usb_types.rs` tiene `CanControllerError::BusOff` variant usado para bus-off notification
+14. El `overflow_pending` flag en can_driver_task es un placeholder — full `GS_CAN_FLAG_OVERFLOW` implementation deferred to Fase 1
+15. BSP `can.rs` tiene `CanTxError::Timeout` y `CanTxError::FrameError` variants
+16. Embassy `IndependentWatchdog` está en `embassy_stm32::wdg` module (no `iwdg`)
+17. Build warning sobre `#[cfg_attr(feature = "defmt")]` en bsp-f446/can.rs es benigna (missing feature declaration in Cargo.toml)
 
 ## Lecciones Aprendidas de Interoperabilidad con gs_usb
 
