@@ -17,6 +17,7 @@ static_cell = "2.0"
 cortex-m-rt.workspace = true
 cortex-m.workspace = true
 bytemuck.workspace = true
+portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
 
 # Dependencias a nuestros crates del workspace
 bsp-f446 = { path = "../crates/bsp-f446" }
