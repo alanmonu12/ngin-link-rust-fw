@@ -1,5 +1,5 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "probe-rs run --chip STM32F446RE"
+runner = "probe-rs run --chip STM32F446RE --connect-under-reset"
 rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=-Tdefmt.x",
@@ -18,3 +18,4 @@ DEFMT_LOG = "info"
 test-linux = "test --target x86_64-unknown-linux-gnu"
 test-win = "test --target x86_64-pc-windows-msvc"
 test-mac = "test --target aarch64-apple-darwin"
+

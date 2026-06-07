@@ -102,6 +102,7 @@ dependencies = [
  "defmt 0.3.100",
  "embassy-executor",
  "embassy-stm32",
+ "embassy-time",
  "embassy-usb",
  "gs-usb-protocol",
  "static_cell",
