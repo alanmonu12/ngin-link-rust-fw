@@ -1,9 +1,9 @@
-// Usamos defmt en producción (microcontrolador)
-#[cfg(not(test))]
+// Usamos defmt solo cuando el feature está activo (producción en el MCU)
+#[cfg(feature = "defmt")]
 use defmt::info;
 
-// Ignoramos los logs en las pruebas del host para evitar errores de compilación con defmt
-#[cfg(test)]
+// Sin feature defmt: silenciamos los logs con un macro vacío
+#[cfg(not(feature = "defmt"))]
 macro_rules! info { ($($arg:tt)*) => {} }
 
 use embassy_usb::control::{InResponse, OutResponse, Request, RequestType};
