@@ -3,8 +3,11 @@ name = "gs-usb-protocol"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+defmt = ["dep:defmt"]
+
 [dependencies]
-defmt.workspace = true
+defmt = { workspace = true, optional = true }
 embassy-usb.workspace = true
 bytemuck.workspace = true
 
