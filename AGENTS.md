@@ -21,7 +21,15 @@ ngin-link-rust-fw/
 │   ├── Cargo.toml
 │   ├── build.rs           # Linker flags (--nmagic)
 │   └── src/
-│       └── main.rs        # Entry point, tareas Embassy, ruteo CAN<->USB
+│       ├── main.rs        # Entry point: init + spawn (orquestación pura)
+│       ├── channels.rs    # CanDriverCmd, CanTxRequest, channels, callbacks USB
+│       ├── usb_setup.rs   # build_usb_stack(), StaticCells, tipos USB (genérico sobre Driver)
+│       └── tasks/
+│           ├── mod.rs      # Re-exports públicos
+│           ├── can.rs      # can_driver_task (actor único del hardware CAN)
+│           ├── usb_run.rs  # usb_run (corre UsbDevice)
+│           ├── usb_tx.rs   # usb_tx_task (CAN→host + decodificación OBD2/UDS)
+│           └── usb_rx.rs   # usb_rx_task (host→CAN)
 ├── crates/
 │   ├── bsp-f446/          # Board Support Package para STM32F446
 │   │   └── src/
@@ -89,7 +97,8 @@ Host USB → gs_usb control transfer → GsUsbControlHandler
 - Recuperación automática de bus-off en can_driver_task
 - TX con timeout (100ms) y abort de mailboxes
 - Interoperabilidad verificada con driver gs_usb del kernel Linux (candump funciona)
-- 68 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host)
+- 68 tests unitarios en gs-usb-protocol + 3 en can-protocol (corren en host con `cargo test-linux`)
+- Estructura modular de firmware: main.rs (orquestación), channels.rs (estado compartido), usb_setup.rs (stack USB), tasks/ (cada tarea en su archivo)
 
 ### Pendiente / TODO
 - **CAN FD:** No soportado aún
@@ -140,9 +149,11 @@ DEFMT_LOG=trace cargo run --release
 4. Al modificar gs_usb_types.rs, asegurar que los structs sean `#[repr(C)]` y `Pod`
 5. Los tests de gs_usb_protocol y can_protocol corren en host, no en el MCU
 6. El BSP encapsula TODO lo relacionado al hardware específico del STM32F446
-7. El flujo principal está en main.rs: can_driver_task → CAN_RX_CHANNEL → usb_tx_task
+7. El flujo principal está en tasks/: can_driver_task → CAN_RX_CHANNEL → usb_tx_task
 8. Para agregar nuevas capacidades USB, modificar GsUsbControlHandler
 9. `can_driver_task` es el actor único del hardware CAN; no se puede separar RX/TX/CTRL en tareas diferentes porque `embassy_stm32::can::Can` requiere `&mut self`
+10. `channels.rs` concentra todo el estado compartido (channels, tipos, callbacks); `usb_setup.rs` construye el stack USB de forma genérica sobre `Driver<'static>`
+11. `gs-usb-protocol` usa `cfg(feature = "defmt")` para logs, no `cfg(test)`. Correr tests con `cargo test-linux` (sin feature defmt)
 
 ## Lecciones Aprendidas de Interoperabilidad con gs_usb
 
