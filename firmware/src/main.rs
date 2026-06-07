@@ -11,7 +11,7 @@ use static_cell::StaticCell;
 use gs_usb_protocol::{default_gs_usb_config, handler::GsUsbControlHandler};
 use gs_usb_protocol::gs_usb_types::{
     GsDeviceCapabilities, GsHostFrame, GsTxMsg, GS_CAN_FEATURE_IDENTIFY, GS_CAN_FEATURE_LISTEN_ONLY,
-    GS_CAN_FEATURE_LOOP_BACK, GS_CAN_FEATURE_USER_ID,
+    GS_CAN_FEATURE_LOOP_BACK, GS_CAN_FEATURE_USER_ID, CanBusError,
 };
 use embassy_futures::select::{select, Either};
 
@@ -25,7 +25,7 @@ static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, can_protocol::CanFrame, 
 /// Unificamos control (Start/Stop/SetBitTiming) y transmisión en un solo canal
 /// para simplificar el bucle del driver y evitar un `select3` ilegible.
 enum CanDriverCmd {
-    Start,
+    Start { loopback: bool, listen_only: bool, one_shot: bool },
     Stop,
     SetBitTiming(gs_usb_protocol::gs_usb_types::GsDeviceBitTiming),
     Transmit(CanTxRequest),
@@ -44,8 +44,11 @@ struct CanTxRequest {
 
 static USB_ECHO_CHANNEL: Channel<CriticalSectionRawMutex, GsHostFrame, 16> = Channel::new();
 
-fn on_start_cb() {
-    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Start);
+fn on_start_cb(flags: u32) {
+    let loopback = (flags & gs_usb_protocol::gs_usb_types::GS_CAN_FLAG_LOOP_BACK) != 0;
+    let listen_only = (flags & gs_usb_protocol::gs_usb_types::GS_CAN_FLAG_LISTEN_ONLY) != 0;
+    let one_shot = (flags & gs_usb_protocol::gs_usb_types::GS_CAN_FLAG_ONE_SHOT) != 0;
+    let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Start { loopback, listen_only, one_shot });
 }
 fn on_stop_cb() {
     let _ = CAN_CMD_CHANNEL.try_send(CanDriverCmd::Stop);
@@ -156,28 +159,38 @@ async fn usb_task(mut usb: UsbDevice<'static, bsp_f446::usb::BspUsbDriver>) -> !
 #[embassy_executor::task]
 async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
     let mut is_started = false;
+    let mut can_error_count: u32 = 0;
 
     loop {
         if is_started {
-            // Estado RUNNING: esperamos comandos O tramas del bus (select de 2, no 3).
             match select(CAN_CMD_CHANNEL.receive(), can.can.read()).await {
                 Either::First(cmd) => {
                     match cmd {
                         CanDriverCmd::Stop => {
-                            info!("CAN: Apagando controlador por comando USB...");
+                            info!("CAN: Apagando controlador");
                             is_started = false;
-                            can.stop();
+                            can.stop().await;
                         }
-                        CanDriverCmd::Start => {
-                            info!("CAN: Ya estaba iniciado");
+                        CanDriverCmd::Start { loopback, listen_only, one_shot } => {
+                            // El host re-envía START, posiblemente con modo diferente.
+                            // Re-aplicamos la configuración para cambiar de Normal a Listen-Only etc.
+                            info!("CAN: Re-aplicando modo (loopback={}, listen_only={}, one_shot={})", loopback, listen_only, one_shot);
+                            can.start(loopback, listen_only, one_shot).await;
                         }
-                        CanDriverCmd::SetBitTiming(_) => {
-                            info!("CAN: Debes hacer STOP antes de cambiar la velocidad");
+                        CanDriverCmd::SetBitTiming(timing) => {
+                            info!("CAN: Reconfigurando Bit Timing en caliente: brp={}, prop={}, phase1={}, phase2={}, sjw={}",
+                                timing.brp, timing.prop_seg, timing.phase_seg1, timing.phase_seg2, timing.sjw);
+                            can.set_bit_timing(&timing);
+                            // modify_config() pone el CAN en init mode y luego en sleep.
+                            // Hay que sacar del sleep y re-habilitar.
+                            can.reenable().await;
                         }
                         CanDriverCmd::Transmit(tx_req) => {
+                            info!("CAN TX: Enviando id=0x{:03X} ext={} dlc={}", tx_req.id, tx_req.is_extended, tx_req.dlc);
                             let data_slice = &tx_req.data[..tx_req.dlc as usize];
                             match can.transmit(tx_req.id, tx_req.is_extended, tx_req.is_rtr, data_slice).await {
                                 Ok(()) => {
+                                    info!("CAN TX: Enviado OK");
                                     let echo_frame = GsHostFrame::from_tx_msg_echo(
                                         tx_req.echo_id,
                                         tx_req.id,
@@ -186,6 +199,9 @@ async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                                         &tx_req.data,
                                     );
                                     let _ = USB_ECHO_CHANNEL.try_send(echo_frame);
+                                }
+                                Err(bsp_f446::can::CanTxError::Timeout) => {
+                                    warn!("CAN TX: Timeout — sin ACK del bus, mailboxes abortados");
                                 }
                                 Err(e) => {
                                     error!("CAN TX: Error al transmitir: {:?}", defmt::Debug2Format(&e));
@@ -210,19 +226,58 @@ async fn can_driver_task(mut can: bsp_f446::can::BspCan) {
                         data[..dlc].copy_from_slice(payload);
                     }
 
+                    info!("CAN RX: id=0x{:03X} ext={} dlc={} data={=[u8]:#X}", id, is_extended, dlc, &data[..dlc.min(8)]);
+
                     let generic_frame = can_protocol::CanFrame { id, is_extended, data, dlc: dlc as u8 };
                     CAN_RX_CHANNEL.send(generic_frame).await;
                 }
-                Either::Second(Err(_)) => {}
+                Either::Second(Err(e)) => {
+                    can_error_count += 1;
+                    let err_frame = match &e {
+                        embassy_stm32::can::enums::BusError::Stuff => {
+                            warn!("CAN RX error #{}, tipo: Stuff", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::Stuff)
+                        }
+                        embassy_stm32::can::enums::BusError::Form => {
+                            warn!("CAN RX error #{}, tipo: Form", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::Form)
+                        }
+                        embassy_stm32::can::enums::BusError::Acknowledge => {
+                            warn!("CAN RX error #{}, tipo: Acknowledge", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::Acknowledge)
+                        }
+                        embassy_stm32::can::enums::BusError::BitRecessive => {
+                            warn!("CAN RX error #{}, tipo: BitRecessive", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::BitRecessive)
+                        }
+                        embassy_stm32::can::enums::BusError::BitDominant => {
+                            warn!("CAN RX error #{}, tipo: BitDominant", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::BitDominant)
+                        }
+                        embassy_stm32::can::enums::BusError::Crc => {
+                            warn!("CAN RX error #{}, tipo: Crc", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::Crc)
+                        }
+                        embassy_stm32::can::enums::BusError::Software => {
+                            warn!("CAN RX error #{}, tipo: Software", can_error_count);
+                            GsHostFrame::from_bus_error(CanBusError::Software)
+                        }
+                    };
+                    let _ = USB_ECHO_CHANNEL.try_send(err_frame);
+                    if can.can.is_sleeping() {
+                        info!("CAN: Recuperando de bus-off...");
+                        can.can.enable().await;
+                        can_error_count = 0;
+                    }
+                }
             }
         } else {
-            // Estado STOPPED: solo aceptamos comandos (no leemos del bus).
             let cmd = CAN_CMD_CHANNEL.receive().await;
             match cmd {
-                CanDriverCmd::Start => {
-                    info!("CAN: Iniciando controlador...");
+                CanDriverCmd::Start { loopback, listen_only, one_shot } => {
+                    info!("CAN: Iniciando controlador (loopback={}, listen_only={}, one_shot={})...", loopback, listen_only, one_shot);
                     is_started = true;
-                    can.start();
+                    can.start(loopback, listen_only, one_shot).await;
                 }
                 CanDriverCmd::Stop => {
                     info!("CAN: Ya estaba detenido");
@@ -270,12 +325,11 @@ async fn usb_tx_task(mut ep_in: bsp_f446::usb::BspUsbEndpointIn) {
         };
 
         let bytes = bytemuck::bytes_of(&host_frame);
+        info!("USB TX: can_id=0x{:08X} dlc={} flags=0x{:02X} echo_id={}", host_frame.can_id, host_frame.can_dlc, host_frame.flags, host_frame.echo_id);
 
         match ep_in.write(bytes).await {
-            Ok(()) => {}
-            Err(e) => {
-                error!("USB TX: Error al escribir al endpoint: {:?}", defmt::Debug2Format(&e));
-            }
+            Ok(n) => info!("USB TX OK: {} bytes enviados al host", n),
+            Err(e) => error!("USB TX: Error al escribir al endpoint: {:?}", defmt::Debug2Format(&e)),
         }
     }
 }
@@ -293,6 +347,8 @@ async fn usb_rx_task(mut ep_out: bsp_f446::usb::BspUsbEndpointOut) {
                 let tx_msg: GsTxMsg = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsTxMsg>()]);
                 
                 let dlc = tx_msg.dlc();
+                info!("USB RX: TX request id=0x{:03X}, ext={}, dlc={}, echo_id={}", 
+                    tx_msg.id(), tx_msg.is_extended(), dlc, tx_msg.echo_id);
                 let tx_req = CanTxRequest {
                     echo_id: tx_msg.echo_id,
                     id: tx_msg.id(),
