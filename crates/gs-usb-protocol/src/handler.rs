@@ -1,6 +1,6 @@
 // Usamos defmt solo cuando el feature está activo (producción en el MCU)
 #[cfg(feature = "defmt")]
-use defmt::info;
+use defmt::{info, trace};
 
 // Sin feature defmt: silenciamos los logs con un macro vacío
 #[cfg(not(feature = "defmt"))]
@@ -88,7 +88,7 @@ impl Handler for GsUsbControlHandler {
             return None;
         }
 
-        info!("-> IN Req: {}, Val: {}, Len: {}", req.request, req.value, req.length);
+        trace!("-> IN Req: {}, Val: {}, Len: {}", req.request, req.value, req.length);
 
         match req.request {
             // El host pregunta por las constantes de temporización del CAN (Request 4)
@@ -159,7 +159,7 @@ impl Handler for GsUsbControlHandler {
             return None;
         }
 
-        info!("<- OUT Req: {}, Val: {}, Len: {}", req.request, req.value, req.length);
+        trace!("<- OUT Req: {}, Val: {}, Len: {}", req.request, req.value, req.length);
 
         match req.request {
             GS_USB_BREQ_BITTIMING => {
