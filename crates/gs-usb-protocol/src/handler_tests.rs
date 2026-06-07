@@ -100,8 +100,9 @@ fn test_device_config_devuelve_valores_correctos() {
 
     if let Some(InResponse::Accepted(data)) = response {
         let config: GsDeviceConfig = bytemuck::pod_read_unaligned(data);
-        assert_eq!(config.interface_count, 1, "Debería reportar 1 interfaz CAN");
-        assert_eq!(config.sw_version, 1, "La versión de software debería ser 1");
+        // icount=0 → el kernel hace icount+1=1 interfaz CAN
+        assert_eq!(config.interface_count, 0, "icount=0 significa 1 interfaz CAN (kernel hace icount+1)");
+        assert_eq!(config.sw_version, 2, "La versión de software debería ser 2");
         assert_eq!(config.hw_version, 1, "La versión de hardware debería ser 1");
     }
 }
@@ -123,15 +124,25 @@ fn test_bt_const_devuelve_limites_correctos() {
 }
 
 #[test]
-fn test_bt_const_feature_incluye_listen_only_y_loop_back() {
+fn test_bt_const_feature_refleja_capabilities() {
     let mut handler = GsUsbControlHandler::default();
+    handler.capabilities = GsDeviceCapabilities::default()
+        .with_feature(GS_CAN_FEATURE_LISTEN_ONLY)
+        .with_feature(GS_CAN_FEATURE_LOOP_BACK)
+        .with_feature(GS_CAN_FEATURE_IDENTIFY)
+        .with_feature(GS_CAN_FEATURE_USER_ID);
+
     let req = create_vendor_request(Direction::In, GS_USB_BREQ_BT_CONST, 40);
     let mut buf = [0u8; 40];
 
     if let Some(InResponse::Accepted(data)) = handler.control_in(req, &mut buf) {
         let consts: GsDeviceBtConst = bytemuck::pod_read_unaligned(data);
+        assert_eq!(consts.feature, handler.capabilities.feature,
+            "bt_const.feature debe reflejar capabilities.feature");
         assert_eq!(consts.feature & GS_CAN_FEATURE_LISTEN_ONLY, GS_CAN_FEATURE_LISTEN_ONLY);
         assert_eq!(consts.feature & GS_CAN_FEATURE_LOOP_BACK, GS_CAN_FEATURE_LOOP_BACK);
+        assert_eq!(consts.feature & GS_CAN_FEATURE_IDENTIFY, GS_CAN_FEATURE_IDENTIFY);
+        assert_eq!(consts.feature & GS_CAN_FEATURE_USER_ID, GS_CAN_FEATURE_USER_ID);
     } else {
         panic!("BT_CONST no fue aceptado");
     }

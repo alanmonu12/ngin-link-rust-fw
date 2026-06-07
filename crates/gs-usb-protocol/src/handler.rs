@@ -22,7 +22,8 @@ const U32_LEN: usize = core::mem::size_of::<u32>();
 /// `Channel` desde dentro del callback.
 pub struct GsUsbControlHandler {
     /// Callback invocado al recibir `GS_USB_BREQ_MODE` con bit START.
-    pub on_start: Option<fn()>,
+    /// El argumento `mode` contiene los flags de modo (LOOPBACK, LISTEN_ONLY, etc.).
+    pub on_start: Option<fn(u32)>,
     /// Callback invocado al recibir `GS_USB_BREQ_MODE` con bit STOP.
     pub on_stop: Option<fn()>,
     /// Callback invocado al recibir `GS_USB_BREQ_BITTIMING`.
@@ -110,13 +111,20 @@ impl Handler for GsUsbControlHandler {
 
             // El host pregunta por la configuración del dispositivo (Request 5)
             GS_USB_BREQ_DEVICE_CONFIG => {
+                // icount=0 significa 1 interfaz CAN (el kernel hace icount+1).
+                // icount=1 crearía 2 interfaces (can0 y can1), lo cual es incorrecto.
                 let config = GsDeviceConfig {
-                    interface_count: 1, // We have one CAN interface.
-                    sw_version: 1,      // Firmware version 1.
-                    hw_version: 1,      // Hardware version 1.
+                    interface_count: 0,
+                    sw_version: 2,
+                    hw_version: 1,
                     ..Default::default()
                 };
-                Some(Self::write_in(buf, bytemuck::bytes_of(&config)))
+                let bytes = bytemuck::bytes_of(&config);
+                info!(
+                    "[USB] DEVICE_CONFIG: interface_count={} sw_version={} hw_version={} bytes={=[u8]:#X}",
+                    config.interface_count, config.sw_version, config.hw_version, bytes
+                );
+                Some(Self::write_in(buf, bytes))
             }
 
             // El host pregunta el timestamp actual del dispositivo (Request 6)
@@ -168,15 +176,21 @@ impl Handler for GsUsbControlHandler {
                 }
                 Some(OutResponse::Accepted)
             }
-            GS_USB_BREQ_HOST_FORMAT | GS_USB_BREQ_SET_TERMINATION => Some(OutResponse::Accepted),
-            GS_USB_BREQ_MODE => {
+            GS_USB_BREQ_HOST_FORMAT => {
                 if buf.len() >= U32_LEN {
-                    let mode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                    if (mode & 1) == 1 {
-                        // Chequeamos el bit de START/STOP
-                        info!("[USB] Comando START recibido");
+                    let host_fmt = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    info!("[USB] HOST_FORMAT recibido: version={}", host_fmt);
+                }
+                Some(OutResponse::Accepted)
+            }
+            GS_USB_BREQ_SET_TERMINATION => Some(OutResponse::Accepted),
+            GS_USB_BREQ_MODE => {
+                if buf.len() >= core::mem::size_of::<GsDeviceMode>() {
+                    let dev_mode: GsDeviceMode = bytemuck::pod_read_unaligned(&buf[..core::mem::size_of::<GsDeviceMode>()]);
+                    if dev_mode.mode == 1 {
+                        info!("[USB] Comando START recibido, flags=0x{:08X}", dev_mode.flags);
                         if let Some(cb) = self.on_start {
-                            cb();
+                            cb(dev_mode.flags);
                         }
                     } else {
                         info!("[USB] Comando STOP recibido");
@@ -227,6 +241,6 @@ impl GsUsbControlHandler {
     /// soporta nativamente). El firmware puede sobreescribir `capabilities`
     /// para ampliar el set de features.
     fn bt_const_feature(&self) -> u32 {
-        GS_CAN_FEATURE_LISTEN_ONLY | GS_CAN_FEATURE_LOOP_BACK
+        self.capabilities.feature
     }
 }

@@ -77,6 +77,18 @@ pub struct GsDeviceCapabilities {
     pub feature: u32,
 }
 
+/// Modo del dispositivo enviado por el host via `GS_USB_BREQ_MODE`.
+///
+/// Corresponde a `struct gs_device_mode` del kernel Linux:
+///   - `mode`: 1 = START, 0 = RESET
+///   - `flags`: flags de modo (LOOP_BACK, LISTEN_ONLY, etc.)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default, PartialEq, Eq)]
+pub struct GsDeviceMode {
+    pub mode: u32,
+    pub flags: u32,
+}
+
 impl GsDeviceCapabilities {
     /// Acumula un bitfield de features encadenando llamadas.
     /// Usa OR para preservar los bits ya seteados.
@@ -126,6 +138,12 @@ pub const GS_CAN_ID_FLAG_EFF: u32 = 1 << 31;
 pub const GS_CAN_ID_FLAG_RTR: u32 = 1 << 30;
 pub const GS_CAN_ID_FLAG_ERR: u32 = 1 << 29;
 
+/// Valor especial de echo_id que indica que el frame fue recibido del bus (RX),
+/// no es un eco de transmisión. El driver gs_usb del kernel Linux usa
+/// este valor para distinguir frames RX de ecos de TX.
+/// Fuente: drivers/net/can/usb/gs_usb.c en el kernel Linux.
+pub const GS_HOST_FRAME_ECHO_ID_RX: u32 = 0xFFFF_FFFF;
+
 pub const GS_CAN_ID_MASK_SFF: u32 = 0x0000_07FF;
 pub const GS_CAN_ID_MASK_EFF: u32 = 0x1FFF_FFFF;
 
@@ -133,6 +151,48 @@ pub const GS_CAN_FLAG_OVERFLOW: u8 = 1 << 0;
 pub const GS_CAN_FLAG_FD: u8 = 1 << 1;
 pub const GS_CAN_FLAG_BRS: u8 = 1 << 2;
 pub const GS_CAN_FLAG_ESI: u8 = 1 << 3;
+
+// SocketCAN error flags (can_id field, bit 29 = ERR_FLAG)
+// Fuente: include/uapi/linux/can/error.h del kernel Linux
+pub const CAN_ERR_DLC: u8 = 8;
+pub const CAN_ERR_TX_TIMEOUT: u32 = 0x0000_0001;
+pub const CAN_ERR_LOSTARB: u32 = 0x0000_0002;
+pub const CAN_ERR_CRTL: u32 = 0x0000_0004;
+pub const CAN_ERR_PROT: u32 = 0x0000_0008;
+pub const CAN_ERR_TRX: u32 = 0x0000_0010;
+pub const CAN_ERR_ACK: u32 = 0x0000_0020;
+pub const CAN_ERR_BUSOFF: u32 = 0x0000_0040;
+pub const CAN_ERR_BUSERROR: u32 = 0x0000_0080;
+pub const CAN_ERR_RESTARTED: u32 = 0x0000_0100;
+pub const CAN_ERR_CNT: u32 = 0x0000_0200;
+
+// SocketCAN protocol error type codes (data[2])
+pub const CAN_ERR_PROT_UNSPEC: u8 = 0x00;
+pub const CAN_ERR_PROT_BIT: u8 = 0x01;
+pub const CAN_ERR_PROT_FORM: u8 = 0x02;
+pub const CAN_ERR_PROT_STUFF: u8 = 0x04;
+pub const CAN_ERR_PROT_BIT0: u8 = 0x08;
+pub const CAN_ERR_PROT_BIT1: u8 = 0x10;
+pub const CAN_ERR_PROT_OVERLOAD: u8 = 0x20;
+pub const CAN_ERR_PROT_ACTIVE: u8 = 0x40;
+pub const CAN_ERR_PROT_TX: u8 = 0x80;
+
+// SocketCAN controller error codes (data[1])
+pub const CAN_ERR_CRTL_RX_OVERFLOW: u8 = 0x01;
+pub const CAN_ERR_CRTL_TX_OVERFLOW: u8 = 0x02;
+pub const CAN_ERR_CRTL_RX_WARNING: u8 = 0x04;
+pub const CAN_ERR_CRTL_TX_WARNING: u8 = 0x08;
+pub const CAN_ERR_CRTL_RX_PASSIVE: u8 = 0x10;
+pub const CAN_ERR_CRTL_TX_PASSIVE: u8 = 0x20;
+pub const CAN_ERR_CRTL_ACTIVE: u8 = 0x40;
+
+// Mode flags for GS_USB_BREQ_MODE — campo `flags` del struct gs_device_mode
+// These match the gs_usb kernel driver (include/uapi/linux/can/gs_usb.h)
+pub const GS_CAN_MODE_START: u32 = 0; // gs_device_mode.mode = 0 → RESET, 1 → START
+pub const GS_CAN_FLAG_LISTEN_ONLY: u32 = 1 << 0;
+pub const GS_CAN_FLAG_LOOP_BACK: u32 = 1 << 1;
+pub const GS_CAN_FLAG_TRIPLE_SAMPLE: u32 = 1 << 2;
+pub const GS_CAN_FLAG_ONE_SHOT: u32 = 1 << 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
@@ -146,6 +206,29 @@ pub struct GsHostFrame {
     pub data: [u8; 8],
 }
 
+/// Tipos de error CAN que el firmware puede reportar al host.
+/// Mapea directamente a los errores del bxCAN del STM32.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CanBusError {
+    Stuff,
+    Form,
+    Acknowledge,
+    BitRecessive,
+    BitDominant,
+    Crc,
+    Software,
+}
+
+/// Error frame del controlador CAN (bus-off, error passive, etc.)
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CanControllerError {
+    BusOff,
+    ErrorPassive,
+    ErrorWarning,
+}
+
 impl GsHostFrame {
     pub fn from_can_frame(id: u32, is_extended: bool, dlc: u8, data: &[u8; 8]) -> Self {
         let can_id = if is_extended {
@@ -155,7 +238,7 @@ impl GsHostFrame {
         };
 
         Self {
-            echo_id: 0,
+            echo_id: GS_HOST_FRAME_ECHO_ID_RX,
             can_id,
             can_dlc: dlc,
             channel: 0,
@@ -180,6 +263,62 @@ impl GsHostFrame {
             flags: GS_USB_FLAG_TX_ECHO,
             reserved: 0,
             data: *data,
+        }
+    }
+
+    /// Crea un error frame SocketCAN a partir de un error de protocolo del bus CAN.
+    /// El can_id lleva el flag ERR seteado y los bits de error de SocketCAN.
+    /// Los primeros bytes de data[] contienen los campos de error SocketCAN:
+    ///   data[1] = CAN_ERR_CRTL_*
+    ///   data[2] = CAN_ERR_PROT_*
+    pub fn from_bus_error(err: CanBusError) -> Self {
+        let (can_id_bits, prot_type) = match err {
+            CanBusError::Stuff => (CAN_ERR_PROT, CAN_ERR_PROT_STUFF),
+            CanBusError::Form => (CAN_ERR_PROT, CAN_ERR_PROT_FORM),
+            CanBusError::Acknowledge => (CAN_ERR_ACK, 0),
+            CanBusError::BitRecessive => (CAN_ERR_PROT, CAN_ERR_PROT_BIT0),
+            CanBusError::BitDominant => (CAN_ERR_PROT, CAN_ERR_PROT_BIT1),
+            CanBusError::Crc => (CAN_ERR_PROT, 0),
+            CanBusError::Software => (CAN_ERR_BUSERROR, 0),
+        };
+
+        let mut data = [0u8; 8];
+        if can_id_bits & CAN_ERR_PROT != 0 {
+            data[2] = prot_type;
+        }
+
+        Self {
+            echo_id: GS_HOST_FRAME_ECHO_ID_RX,
+            can_id: GS_CAN_ID_FLAG_ERR | can_id_bits,
+            can_dlc: CAN_ERR_DLC,
+            channel: 0,
+            flags: 0,
+            reserved: 0,
+            data,
+        }
+    }
+
+    /// Crea un error frame SocketCAN para eventos de estado del controlador.
+    pub fn from_controller_error(err: CanControllerError) -> Self {
+        let (can_id_bits, crtl_flags) = match err {
+            CanControllerError::BusOff => (CAN_ERR_BUSOFF, 0),
+            CanControllerError::ErrorPassive => (CAN_ERR_CRTL, CAN_ERR_CRTL_RX_PASSIVE | CAN_ERR_CRTL_TX_PASSIVE),
+            CanControllerError::ErrorWarning => (CAN_ERR_CRTL, CAN_ERR_CRTL_RX_WARNING | CAN_ERR_CRTL_TX_WARNING),
+        };
+
+        let mut data = [0u8; 8];
+        if can_id_bits & CAN_ERR_CRTL != 0 {
+            data[1] = crtl_flags;
+        }
+
+        Self {
+            echo_id: GS_HOST_FRAME_ECHO_ID_RX,
+            can_id: GS_CAN_ID_FLAG_ERR | can_id_bits,
+            can_dlc: CAN_ERR_DLC,
+            channel: 0,
+            flags: 0,
+            reserved: 0,
+            data,
         }
     }
 }
@@ -234,7 +373,7 @@ mod tests {
         let data = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
         let frame = GsHostFrame::from_can_frame(0x123, false, 8, &data);
 
-        assert_eq!(frame.echo_id, 0);
+        assert_eq!(frame.echo_id, GS_HOST_FRAME_ECHO_ID_RX);
         assert_eq!(frame.can_id, 0x123);
         assert_eq!(frame.can_dlc, 8);
         assert_eq!(frame.channel, 0);
@@ -247,7 +386,7 @@ mod tests {
         let data = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00];
         let frame = GsHostFrame::from_can_frame(0x1ABCDEF, true, 4, &data);
 
-        assert_eq!(frame.echo_id, 0);
+        assert_eq!(frame.echo_id, GS_HOST_FRAME_ECHO_ID_RX);
         assert_eq!(frame.can_id, 0x8000_0000 | 0x1ABCDEF);
         assert_eq!(frame.can_dlc, 4);
         assert_eq!(frame.channel, 0);
@@ -275,7 +414,7 @@ mod tests {
         let bytes = bytemuck::bytes_of(&frame);
 
         assert_eq!(bytes.len(), 20);
-        assert_eq!(bytes[0..4], [0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(bytes[0..4], [0xFF, 0xFF, 0xFF, 0xFF]);
         assert_eq!(bytes[4..8], [0xDF, 0x07, 0x00, 0x00]);
         assert_eq!(bytes[8], 8);
         assert_eq!(bytes[9], 0);
@@ -543,5 +682,91 @@ mod tests {
         assert_eq!(GS_CAN_FEATURE_USER_ID, 1 << 6);
         assert_eq!(GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE, 1 << 7);
         assert_eq!(GS_CAN_FEATURE_FD, 1 << 8);
+    }
+
+    // Tests para error frames SocketCAN
+
+    #[test]
+    fn test_from_bus_error_ack() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::Acknowledge);
+        assert_eq!(frame.echo_id, GS_HOST_FRAME_ECHO_ID_RX);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_ACK);
+        assert_eq!(frame.can_dlc, CAN_ERR_DLC);
+        assert_eq!(frame.channel, 0);
+        assert_eq!(frame.flags, 0);
+        // ACK error no tiene data[2] porque no es CAN_ERR_PROT
+        assert_eq!(frame.data[2], 0);
+    }
+
+    #[test]
+    fn test_from_bus_error_stuff() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::Stuff);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_PROT);
+        assert_eq!(frame.data[2], CAN_ERR_PROT_STUFF);
+    }
+
+    #[test]
+    fn test_from_bus_error_form() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::Form);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_PROT);
+        assert_eq!(frame.data[2], CAN_ERR_PROT_FORM);
+    }
+
+    #[test]
+    fn test_from_bus_error_bit_dominant() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::BitDominant);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_PROT);
+        assert_eq!(frame.data[2], CAN_ERR_PROT_BIT1);
+    }
+
+    #[test]
+    fn test_from_bus_error_bit_recessive() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::BitRecessive);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_PROT);
+        assert_eq!(frame.data[2], CAN_ERR_PROT_BIT0);
+    }
+
+    #[test]
+    fn test_from_bus_error_crc() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::Crc);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_PROT);
+        // CRC error no tiene sub-tipo en data[2]
+        assert_eq!(frame.data[2], 0);
+    }
+
+    #[test]
+    fn test_from_bus_error_software() {
+        let frame = GsHostFrame::from_bus_error(CanBusError::Software);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_BUSERROR);
+        assert_eq!(frame.data[2], 0);
+    }
+
+    #[test]
+    fn test_from_controller_error_bus_off() {
+        let frame = GsHostFrame::from_controller_error(CanControllerError::BusOff);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_BUSOFF);
+        assert_eq!(frame.can_dlc, CAN_ERR_DLC);
+        assert_eq!(frame.echo_id, GS_HOST_FRAME_ECHO_ID_RX);
+    }
+
+    #[test]
+    fn test_from_controller_error_passive() {
+        let frame = GsHostFrame::from_controller_error(CanControllerError::ErrorPassive);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_CRTL);
+        assert_eq!(frame.data[1], CAN_ERR_CRTL_RX_PASSIVE | CAN_ERR_CRTL_TX_PASSIVE);
+    }
+
+    #[test]
+    fn test_from_controller_error_warning() {
+        let frame = GsHostFrame::from_controller_error(CanControllerError::ErrorWarning);
+        assert_eq!(frame.can_id, GS_CAN_ID_FLAG_ERR | CAN_ERR_CRTL);
+        assert_eq!(frame.data[1], CAN_ERR_CRTL_RX_WARNING | CAN_ERR_CRTL_TX_WARNING);
+    }
+
+    #[test]
+    fn test_error_frame_tamaño_es_20_bytes() {
+        // Los error frames usan el mismo struct GsHostFrame
+        let frame = GsHostFrame::from_bus_error(CanBusError::Acknowledge);
+        assert_eq!(core::mem::size_of_val(&frame), 20);
     }
 }
